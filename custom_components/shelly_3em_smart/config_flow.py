@@ -7,7 +7,6 @@ from typing import Any
 import aiohttp
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.core import callback
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -70,18 +69,16 @@ class ShellyAddonConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     @staticmethod
-    @callback
     def async_get_options_flow(
         config_entry: config_entries.ConfigEntry,
     ) -> "ShellyAddonOptionsFlow":
-        return ShellyAddonOptionsFlow(config_entry)
+        # OptionsFlow base class exposes self.config_entry as a read-only
+        # property in HA 2024.11+; do not pass it through or assign to it.
+        return ShellyAddonOptionsFlow()
 
 
 class ShellyAddonOptionsFlow(config_entries.OptionsFlow):
     """Lets the user pick which HA entities to forward state changes from."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
