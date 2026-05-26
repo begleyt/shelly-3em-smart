@@ -1,0 +1,5 @@
+{
+  "name": "Shelly 3EM Smart Monitor",
+  "render_readme": true,
+  "homeassistant": "2024.1.0"
+}

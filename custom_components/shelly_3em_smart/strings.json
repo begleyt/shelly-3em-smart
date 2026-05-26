@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Shelly 3EM Smart Monitor",
+        "description": "Enter the host and port of the running Shelly 3EM Smart Monitor add-on (default: localhost:8080).",
+        "data": {
+          "host": "Host",
+          "port": "Port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Couldn't reach the add-on at that address. Make sure it's running and the host/port are correct."
+    },
+    "abort": {
+      "already_configured": "This add-on instance is already configured."
+    }
+  }
+}

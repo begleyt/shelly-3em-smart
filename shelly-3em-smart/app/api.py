@@ -5,11 +5,26 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from .clusterer import run_clustering
+from .config import settings
 from .db import cursor
 from .mqtt_publisher import publisher
 from .state import state
 
 router = APIRouter()
+
+
+# ---------- info (used by the HACS integration to self-configure) ----------
+
+@router.get("/api/info")
+def info():
+    return {
+        "version": "0.1.5",
+        "shelly_host": settings.shelly_host,
+        "channel_a_label": settings.channel_a_label,
+        "channel_b_label": settings.channel_b_label,
+        "channel_c_label": settings.channel_c_label,
+        "mqtt_enabled": settings.mqtt_enabled,
+    }
 
 
 def _dict_row(cur, row):
