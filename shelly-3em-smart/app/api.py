@@ -18,7 +18,7 @@ router = APIRouter()
 @router.get("/api/info")
 def info():
     return {
-        "version": "0.1.5",
+        "version": "0.1.6",
         "shelly_host": settings.shelly_host,
         "channel_a_label": settings.channel_a_label,
         "channel_b_label": settings.channel_b_label,
@@ -84,12 +84,34 @@ def cluster_events(cluster_id: int, limit: int = 20):
         return cur.fetchall()
 
 
+def _augment_device_row(row: dict, now: float) -> dict:
+    """Add computed current_power_w and current_energy_wh fields to a device row.
+
+    `current_energy_wh` includes any energy accumulated during the in-progress
+    on-period, so the value rises smoothly while a device is running rather
+    than only stepping at each off event.
+    """
+    mean_w = float(row.get("mean_power_w") or 0.0)
+    is_on = bool(row.get("is_on"))
+    base_wh = float(row.get("total_energy_wh") or 0.0)
+    last_on = row.get("last_on_ts")
+    if is_on and last_on:
+        elapsed_s = max(0.0, now - float(last_on))
+        live_wh = base_wh + (mean_w * elapsed_s / 3600.0)
+    else:
+        live_wh = base_wh
+    row["current_power_w"] = mean_w if is_on else 0.0
+    row["current_energy_wh"] = live_wh
+    return row
+
+
 @router.get("/api/devices")
 def list_devices():
+    now = time.time()
     with cursor() as cur:
         cur.row_factory = _dict_row
         cur.execute("SELECT * FROM devices ORDER BY name")
-        return cur.fetchall()
+        return [_augment_device_row(r, now) for r in cur.fetchall()]
 
 
 class DeviceCreate(BaseModel):
@@ -101,9 +123,14 @@ class DeviceCreate(BaseModel):
 @router.post("/api/devices")
 def create_device(body: DeviceCreate):
     with cursor() as cur:
+        cur.row_factory = _dict_row
+        cur.execute("SELECT ABS(mean_power) AS mean_power_w FROM clusters WHERE id = ?", (body.cluster_id,))
+        c = cur.fetchone()
+        mean_power_w = float(c["mean_power_w"]) if c else 0.0
         cur.execute(
-            "INSERT INTO devices (name, notes, created_ts, is_on) VALUES (?,?,?,0)",
-            (body.name, body.notes, time.time()),
+            "INSERT INTO devices (name, notes, created_ts, is_on, mean_power_w, total_energy_wh) "
+            "VALUES (?,?,?,0,?,0)",
+            (body.name, body.notes, time.time(), mean_power_w),
         )
         device_id = cur.lastrowid
         cur.execute(
@@ -115,7 +142,7 @@ def create_device(body: DeviceCreate):
             (device_id, body.cluster_id),
         )
     publisher.publish_device_discovery(device_id, body.name)
-    return {"id": device_id, "name": body.name, "cluster_id": body.cluster_id}
+    return {"id": device_id, "name": body.name, "cluster_id": body.cluster_id, "mean_power_w": mean_power_w}
 
 
 class DeviceUpdate(BaseModel):

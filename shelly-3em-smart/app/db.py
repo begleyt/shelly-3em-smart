@@ -68,13 +68,15 @@ CREATE TABLE IF NOT EXISTS clusters (
 );
 
 CREATE TABLE IF NOT EXISTS devices (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    name           TEXT NOT NULL,
-    notes          TEXT,
-    created_ts     REAL NOT NULL,
-    is_on          INTEGER NOT NULL DEFAULT 0,
-    last_on_ts     REAL,
-    last_off_ts    REAL
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,
+    notes           TEXT,
+    created_ts      REAL NOT NULL,
+    is_on           INTEGER NOT NULL DEFAULT 0,
+    last_on_ts      REAL,
+    last_off_ts     REAL,
+    mean_power_w    REAL NOT NULL DEFAULT 0,
+    total_energy_wh REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS device_state_log (
@@ -97,6 +99,30 @@ def init_db() -> None:
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA synchronous=NORMAL")
     _conn.executescript(SCHEMA)
+    _migrate(_conn)
+
+
+def _migrate(c: sqlite3.Connection) -> None:
+    """Add columns / backfill for upgrades from pre-0.1.6 databases."""
+    cur = c.execute("PRAGMA table_info(devices)")
+    cols = {row[1] for row in cur.fetchall()}
+
+    if "mean_power_w" not in cols:
+        c.execute("ALTER TABLE devices ADD COLUMN mean_power_w REAL NOT NULL DEFAULT 0")
+        # Backfill from each device's most-significant cluster, if any.
+        c.execute(
+            """UPDATE devices
+               SET mean_power_w = COALESCE(
+                   (SELECT ABS(c.mean_power) FROM clusters c
+                    WHERE c.device_id = devices.id
+                    ORDER BY ABS(c.mean_power) DESC LIMIT 1),
+                   0
+               )
+               WHERE mean_power_w = 0"""
+        )
+
+    if "total_energy_wh" not in cols:
+        c.execute("ALTER TABLE devices ADD COLUMN total_energy_wh REAL NOT NULL DEFAULT 0")
 
 
 def conn() -> sqlite3.Connection:
