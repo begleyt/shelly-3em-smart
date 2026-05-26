@@ -7,16 +7,32 @@ from typing import Any
 import aiohttp
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.core import callback
+from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import CONF_HOST, CONF_PORT, DEFAULT_HOST, DEFAULT_PORT, DOMAIN
+from .const import (
+    CONF_HOST,
+    CONF_PORT,
+    CONF_TRACKED_ENTITIES,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DOMAIN,
+    TRACKABLE_DOMAINS,
+)
 from .coordinator import ShellyAddonClient
 
 _LOGGER = logging.getLogger(__name__)
 
 
+def _entity_selector():
+    return selector.EntitySelector(
+        selector.EntitySelectorConfig(multiple=True, domain=TRACKABLE_DOMAINS)
+    )
+
+
 class ShellyAddonConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Ask the user where the Shelly 3EM Smart Monitor add-on is reachable."""
+    """Initial setup: host + port, validated against /api/info."""
 
     VERSION = 1
 
@@ -39,9 +55,7 @@ class ShellyAddonConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(
                     title=f"Shelly 3EM Smart ({host}:{port})",
                     data={CONF_HOST: host, CONF_PORT: port},
-                    description_placeholders={
-                        "version": info.get("version", "?"),
-                    },
+                    description_placeholders={"version": info.get("version", "?")},
                 )
 
         return self.async_show_form(
@@ -53,4 +67,32 @@ class ShellyAddonConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+        )
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> "ShellyAddonOptionsFlow":
+        return ShellyAddonOptionsFlow(config_entry)
+
+
+class ShellyAddonOptionsFlow(config_entries.OptionsFlow):
+    """Lets the user pick which HA entities to forward state changes from."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        self.config_entry = config_entry
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None):
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        current = self.config_entry.options.get(CONF_TRACKED_ENTITIES, [])
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(CONF_TRACKED_ENTITIES, default=current): _entity_selector(),
+                }
+            ),
         )

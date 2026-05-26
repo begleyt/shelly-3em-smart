@@ -37,6 +37,33 @@ class ShellyAddonClient:
     async def stats(self) -> dict:
         return await self._get("/stats")
 
+    async def post_ha_event(
+        self,
+        entity_id: str,
+        old_state: str | None,
+        new_state: str | None,
+        friendly_name: str | None,
+        ts: float | None,
+    ) -> None:
+        payload = {
+            "entity_id": entity_id,
+            "old_state": old_state,
+            "new_state": new_state,
+            "friendly_name": friendly_name,
+            "ts": ts,
+        }
+        try:
+            async with self._session.post(
+                f"{self._base}/ha_event",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as r:
+                r.raise_for_status()
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            # Don't crash the listener for a transient post failure; the next
+            # state change will retry on its own.
+            pass
+
 
 class ShellyAddonCoordinator(DataUpdateCoordinator[dict]):
     """Polls /api/live and /api/devices every couple of seconds."""

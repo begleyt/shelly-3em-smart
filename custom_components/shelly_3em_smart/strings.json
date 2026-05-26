@@ -16,5 +16,16 @@
     "abort": {
       "already_configured": "This add-on instance is already configured."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tracked entities",
+        "description": "Pick the Home Assistant entities whose on/off transitions you want to use to teach the add-on. Each time one of these entities changes state, its timestamp is sent to the add-on and correlated against detected power-step events. After 3 confident matches, the entity is automatically promoted to a labelled device.",
+        "data": {
+          "tracked_entities": "Entities to track"
+        }
+      }
+    }
   }
 }

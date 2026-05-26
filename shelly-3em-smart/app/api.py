@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from .clusterer import run_clustering
 from .config import settings
 from .db import cursor
+from .ha_correlator import record_ha_event
 from .mqtt_publisher import publisher
 from .state import state
 
@@ -18,13 +19,68 @@ router = APIRouter()
 @router.get("/api/info")
 def info():
     return {
-        "version": "0.1.8",
+        "version": "0.2.0",
         "shelly_host": settings.shelly_host,
         "channel_a_label": settings.channel_a_label,
         "channel_b_label": settings.channel_b_label,
         "channel_c_label": settings.channel_c_label,
         "mqtt_enabled": settings.mqtt_enabled,
+        "supports_ha_events": True,
     }
+
+
+# ---------- HA state-change correlation ----------
+
+class HaEventIn(BaseModel):
+    entity_id: str
+    old_state: Optional[str] = None
+    new_state: Optional[str] = None
+    friendly_name: Optional[str] = None
+    ts: Optional[float] = None
+
+
+@router.post("/api/ha_event")
+def post_ha_event(body: HaEventIn):
+    """Record a state change from the HACS integration. Used to correlate
+    HA's ground-truth on/off knowledge with our detected step events."""
+    return record_ha_event(
+        entity_id=body.entity_id,
+        old_state=body.old_state,
+        new_state=body.new_state,
+        friendly_name=body.friendly_name,
+        ts=body.ts,
+    )
+
+
+@router.get("/api/ha_entities")
+def list_ha_entities():
+    """List the entities we've seen state changes from and how close they
+    are to being auto-promoted to devices."""
+    with cursor() as cur:
+        cur.row_factory = _dict_row
+        cur.execute(
+            "SELECT entity_id, friendly_name, first_seen_ts, last_seen_ts, "
+            "match_count, sum_power_w, sum_a_power_w, sum_b_power_w, sum_c_power_w, "
+            "promoted_device_id "
+            "FROM ha_entities ORDER BY match_count DESC, last_seen_ts DESC"
+        )
+        rows = cur.fetchall()
+
+    out: list[dict] = []
+    for r in rows:
+        n = r["match_count"] or 0
+        if n > 0:
+            r["mean_power_w"] = (r["sum_power_w"] or 0.0) / n
+            r["mean_a_power_w"] = (r["sum_a_power_w"] or 0.0) / n
+            r["mean_b_power_w"] = (r["sum_b_power_w"] or 0.0) / n
+            r["mean_c_power_w"] = (r["sum_c_power_w"] or 0.0) / n
+        else:
+            r["mean_power_w"] = 0.0
+            r["mean_a_power_w"] = 0.0
+            r["mean_b_power_w"] = 0.0
+            r["mean_c_power_w"] = 0.0
+        out.append(r)
+    return out
 
 
 def _dict_row(cur, row):

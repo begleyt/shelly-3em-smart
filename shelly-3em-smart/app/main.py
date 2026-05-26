@@ -13,6 +13,7 @@ from .api import router as api_router
 from .clusterer import cluster_loop
 from .config import settings
 from .db import init_db, insert_event, insert_sample, prune_old_samples
+from .ha_correlator import correlate_step_event
 from .inference import match_event_to_device
 from .mqtt_publisher import publisher
 from .shelly_client import run_websocket_loop
@@ -66,6 +67,17 @@ async def on_sample(sample: dict) -> None:
     if event:
         try:
             event_id = insert_event(event)
+
+            # 1. HA correlation: if this step matches a recent state change from
+            #    a tracked HA entity, attribute it directly (may auto-promote).
+            try:
+                correlate_step_event(event_id, event)
+            except Exception:
+                log.exception("HA correlation failed")
+
+            # 2. Cluster-based matcher: handles events that didn't correlate,
+            #    plus pre-promotion events on entities that haven't hit the
+            #    threshold yet.
             device_id = match_event_to_device(event_id, event)
             if device_id is not None:
                 publisher.publish_device_state(device_id, event["direction"])

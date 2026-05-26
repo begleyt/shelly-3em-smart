@@ -68,15 +68,47 @@ CREATE TABLE IF NOT EXISTS clusters (
 );
 
 CREATE TABLE IF NOT EXISTS devices (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    name            TEXT NOT NULL,
-    notes           TEXT,
-    created_ts      REAL NOT NULL,
-    is_on           INTEGER NOT NULL DEFAULT 0,
-    last_on_ts      REAL,
-    last_off_ts     REAL,
-    mean_power_w    REAL NOT NULL DEFAULT 0,
-    total_energy_wh REAL NOT NULL DEFAULT 0
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT NOT NULL,
+    notes            TEXT,
+    created_ts       REAL NOT NULL,
+    is_on            INTEGER NOT NULL DEFAULT 0,
+    last_on_ts       REAL,
+    last_off_ts      REAL,
+    mean_power_w     REAL NOT NULL DEFAULT 0,
+    total_energy_wh  REAL NOT NULL DEFAULT 0,
+    source_entity_id TEXT
+);
+
+-- Raw HA state-change events posted by the HACS integration. Kept for
+-- correlation against step events and as a debug log.
+CREATE TABLE IF NOT EXISTS ha_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL NOT NULL,
+    entity_id   TEXT NOT NULL,
+    old_state   TEXT,
+    new_state   TEXT,
+    direction   TEXT,           -- 'on' | 'off' | NULL (unknown)
+    matched_event_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_ha_events_ts ON ha_events(ts);
+CREATE INDEX IF NOT EXISTS idx_ha_events_entity_ts ON ha_events(entity_id, ts);
+
+-- Accumulated per-entity power signature, built up from correlated step events.
+-- When `match_count` >= the promotion threshold, the entity is auto-created as
+-- a labelled device.
+CREATE TABLE IF NOT EXISTS ha_entities (
+    entity_id        TEXT PRIMARY KEY,
+    friendly_name    TEXT,
+    first_seen_ts    REAL NOT NULL,
+    last_seen_ts     REAL NOT NULL,
+    match_count      INTEGER NOT NULL DEFAULT 0,
+    sum_power_w      REAL NOT NULL DEFAULT 0,
+    sum_power_w_sq   REAL NOT NULL DEFAULT 0,
+    sum_a_power_w    REAL NOT NULL DEFAULT 0,
+    sum_b_power_w    REAL NOT NULL DEFAULT 0,
+    sum_c_power_w    REAL NOT NULL DEFAULT 0,
+    promoted_device_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS device_state_log (
@@ -103,13 +135,12 @@ def init_db() -> None:
 
 
 def _migrate(c: sqlite3.Connection) -> None:
-    """Add columns / backfill for upgrades from pre-0.1.6 databases."""
+    """Add columns / backfill for upgrades from older databases."""
     cur = c.execute("PRAGMA table_info(devices)")
     cols = {row[1] for row in cur.fetchall()}
 
     if "mean_power_w" not in cols:
         c.execute("ALTER TABLE devices ADD COLUMN mean_power_w REAL NOT NULL DEFAULT 0")
-        # Backfill from each device's most-significant cluster, if any.
         c.execute(
             """UPDATE devices
                SET mean_power_w = COALESCE(
@@ -123,6 +154,9 @@ def _migrate(c: sqlite3.Connection) -> None:
 
     if "total_energy_wh" not in cols:
         c.execute("ALTER TABLE devices ADD COLUMN total_energy_wh REAL NOT NULL DEFAULT 0")
+
+    if "source_entity_id" not in cols:
+        c.execute("ALTER TABLE devices ADD COLUMN source_entity_id TEXT")
 
 
 def conn() -> sqlite3.Connection:
