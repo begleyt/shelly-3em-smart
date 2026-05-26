@@ -13,3 +13,6 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Workflow temp files
+.commit-msg.tmp
