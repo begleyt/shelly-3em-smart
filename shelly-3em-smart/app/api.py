@@ -18,7 +18,7 @@ router = APIRouter()
 @router.get("/api/info")
 def info():
     return {
-        "version": "0.1.6",
+        "version": "0.1.7",
         "shelly_host": settings.shelly_host,
         "channel_a_label": settings.channel_a_label,
         "channel_b_label": settings.channel_b_label,
@@ -84,6 +84,93 @@ def cluster_events(cluster_id: int, limit: int = 20):
         return cur.fetchall()
 
 
+def _find_paired_cluster(cur, labeled_cluster: dict) -> Optional[dict]:
+    """Find the opposite-sign cluster whose signature best matches the one
+    the user labelled. Used to auto-link the matching off-cluster when an
+    on-cluster is labelled (and vice versa) so both event directions feed
+    the same device.
+
+    Returns the candidate cluster row, or None if no good match is found.
+    """
+    opp_sign = -1 if labeled_cluster["mean_power"] > 0 else 1
+    cur.execute(
+        """SELECT id, mean_power, mean_a_power, mean_b_power, mean_c_power
+           FROM clusters
+           WHERE device_id IS NULL AND mean_power * ? > 0""",
+        (opp_sign,),
+    )
+    candidates = cur.fetchall()
+    if not candidates:
+        return None
+
+    target_mp = abs(labeled_cluster["mean_power"])
+    target_a = abs(labeled_cluster["mean_a_power"])
+    target_b = abs(labeled_cluster["mean_b_power"])
+    target_c = abs(labeled_cluster["mean_c_power"])
+
+    best = None
+    best_score = float("inf")
+    for c in candidates:
+        score = (
+            (target_mp - abs(c["mean_power"])) ** 2
+            + (target_a - abs(c["mean_a_power"])) ** 2 * 0.5
+            + (target_b - abs(c["mean_b_power"])) ** 2 * 0.5
+            + (target_c - abs(c["mean_c_power"])) ** 2 * 0.5
+        )
+        if score < best_score:
+            best_score = score
+            best = c
+
+    if best is None:
+        return None
+    # Only auto-link if magnitudes match within ~25% (with a floor for small loads).
+    tol = max(target_mp * 0.25, 50.0) ** 2 * 2.0
+    if best_score > tol:
+        return None
+    return best
+
+
+def _recompute_device_state(cur, device_id: int, mean_power_w: float) -> None:
+    """Replay every event currently linked to this device to compute is_on,
+    timestamps, and accumulated energy. Used after labelling so the device
+    reflects the appliance's real state immediately, without waiting for a
+    fresh on/off cycle."""
+    cur.execute(
+        "SELECT ts, direction FROM events WHERE device_id = ? ORDER BY ts",
+        (device_id,),
+    )
+    rows = cur.fetchall()
+
+    is_on = 0
+    last_on_ts: Optional[float] = None
+    last_off_ts: Optional[float] = None
+    total_energy_wh = 0.0
+    current_on_ts: Optional[float] = None
+
+    for row in rows:
+        ts = float(row["ts"])
+        direction = row["direction"]
+        if direction == "on":
+            if not is_on:
+                is_on = 1
+                current_on_ts = ts
+            last_on_ts = ts
+        else:  # off
+            if is_on and current_on_ts is not None:
+                elapsed_s = max(0.0, ts - current_on_ts)
+                total_energy_wh += mean_power_w * elapsed_s / 3600.0
+                is_on = 0
+                current_on_ts = None
+            last_off_ts = ts
+
+    cur.execute(
+        """UPDATE devices
+           SET is_on = ?, last_on_ts = ?, last_off_ts = ?, total_energy_wh = ?
+           WHERE id = ?""",
+        (is_on, last_on_ts, last_off_ts, total_energy_wh, device_id),
+    )
+
+
 def _augment_device_row(row: dict, now: float) -> dict:
     """Add computed current_power_w and current_energy_wh fields to a device row.
 
@@ -114,6 +201,75 @@ def list_devices():
         return [_augment_device_row(r, now) for r in cur.fetchall()]
 
 
+# ---------- cluster pairs (UI helper) ----------
+
+def _pair_score(a: dict, b: dict) -> float:
+    return (
+        (abs(a["mean_power"]) - abs(b["mean_power"])) ** 2
+        + (abs(a["mean_a_power"]) - abs(b["mean_a_power"])) ** 2 * 0.5
+        + (abs(a["mean_b_power"]) - abs(b["mean_b_power"])) ** 2 * 0.5
+        + (abs(a["mean_c_power"]) - abs(b["mean_c_power"])) ** 2 * 0.5
+    )
+
+
+@router.get("/api/cluster_pairs")
+def list_cluster_pairs():
+    """Group unlabelled clusters into probable appliances (a start-cluster
+    paired with its matching stop-cluster) plus orphans that didn't find a
+    confident pair."""
+    with cursor() as cur:
+        cur.row_factory = _dict_row
+        cur.execute(
+            """SELECT id, mean_power, std_power, mean_a_power, mean_b_power,
+                      mean_c_power, mean_pf, sample_count
+               FROM clusters
+               WHERE device_id IS NULL
+               ORDER BY ABS(mean_power) DESC"""
+        )
+        clusters = cur.fetchall()
+
+    on_clusters = [c for c in clusters if c["mean_power"] > 0]
+    off_clusters = [c for c in clusters if c["mean_power"] < 0]
+
+    pairs: list[dict] = []
+    used_off: set[int] = set()
+    used_on: set[int] = set()
+
+    for on_c in on_clusters:
+        target_mp = abs(on_c["mean_power"])
+        tol = max(target_mp * 0.25, 50.0) ** 2 * 2.0
+        best = None
+        best_score = float("inf")
+        for off_c in off_clusters:
+            if off_c["id"] in used_off:
+                continue
+            score = _pair_score(on_c, off_c)
+            if score < best_score:
+                best_score = score
+                best = off_c
+        if best is not None and best_score <= tol:
+            used_off.add(best["id"])
+            used_on.add(on_c["id"])
+            pairs.append({
+                "on_cluster": on_c,
+                "off_cluster": best,
+                "mean_power_w": (abs(on_c["mean_power"]) + abs(best["mean_power"])) / 2.0,
+                "total_events": on_c["sample_count"] + best["sample_count"],
+            })
+
+    pairs.sort(key=lambda p: p["total_events"], reverse=True)
+
+    orphans = (
+        [{"cluster": c, "direction": "on"} for c in on_clusters if c["id"] not in used_on]
+        + [{"cluster": c, "direction": "off"} for c in off_clusters if c["id"] not in used_off]
+    )
+    orphans.sort(key=lambda o: abs(o["cluster"]["mean_power"]), reverse=True)
+
+    return {"pairs": pairs, "orphans": orphans}
+
+
+# ---------- devices ----------
+
 class DeviceCreate(BaseModel):
     name: str
     notes: Optional[str] = None
@@ -122,17 +278,31 @@ class DeviceCreate(BaseModel):
 
 @router.post("/api/devices")
 def create_device(body: DeviceCreate):
+    paired_cluster_id: Optional[int] = None
     with cursor() as cur:
         cur.row_factory = _dict_row
-        cur.execute("SELECT ABS(mean_power) AS mean_power_w FROM clusters WHERE id = ?", (body.cluster_id,))
-        c = cur.fetchone()
-        mean_power_w = float(c["mean_power_w"]) if c else 0.0
+
+        # 1. Read the labelled cluster's signature so we can both snapshot the
+        # device's mean power and look for a matching opposite-sign cluster.
+        cur.execute(
+            "SELECT id, mean_power, mean_a_power, mean_b_power, mean_c_power "
+            "FROM clusters WHERE id = ?",
+            (body.cluster_id,),
+        )
+        labeled = cur.fetchone()
+        mean_power_w = abs(float(labeled["mean_power"])) if labeled else 0.0
+
+        # 2. Create the device with the snapshot mean power. State fields will
+        # be replaced by _recompute_device_state below; we initialise them to
+        # safe defaults here.
         cur.execute(
             "INSERT INTO devices (name, notes, created_ts, is_on, mean_power_w, total_energy_wh) "
             "VALUES (?,?,?,0,?,0)",
             (body.name, body.notes, time.time(), mean_power_w),
         )
         device_id = cur.lastrowid
+
+        # 3. Link the labelled cluster and its events to this device.
         cur.execute(
             "UPDATE clusters SET device_id = ? WHERE id = ?",
             (device_id, body.cluster_id),
@@ -141,8 +311,104 @@ def create_device(body: DeviceCreate):
             "UPDATE events SET device_id = ? WHERE cluster_id = ?",
             (device_id, body.cluster_id),
         )
+
+        # 4. Auto-link the paired opposite-sign cluster (the off-events that
+        # match this appliance) so future state transitions are detected.
+        if labeled:
+            paired = _find_paired_cluster(cur, labeled)
+            if paired:
+                paired_cluster_id = int(paired["id"])
+                cur.execute(
+                    "UPDATE clusters SET device_id = ? WHERE id = ?",
+                    (device_id, paired_cluster_id),
+                )
+                cur.execute(
+                    "UPDATE events SET device_id = ? WHERE cluster_id = ?",
+                    (device_id, paired_cluster_id),
+                )
+
+        # 5. Replay every linked event to compute current state and backfilled energy.
+        _recompute_device_state(cur, device_id, mean_power_w)
+
     publisher.publish_device_discovery(device_id, body.name)
-    return {"id": device_id, "name": body.name, "cluster_id": body.cluster_id, "mean_power_w": mean_power_w}
+    return {
+        "id": device_id,
+        "name": body.name,
+        "cluster_id": body.cluster_id,
+        "paired_cluster_id": paired_cluster_id,
+        "mean_power_w": mean_power_w,
+    }
+
+
+class DeviceManualCreate(BaseModel):
+    name: str
+    notes: Optional[str] = None
+    power_w: float
+    channel_a_power_w: Optional[float] = None
+    channel_b_power_w: Optional[float] = None
+    channel_c_power_w: Optional[float] = None
+    power_factor: Optional[float] = 1.0
+
+
+@router.post("/api/devices/manual")
+def create_device_manual(body: DeviceManualCreate):
+    """Create a device directly from a user-specified signature, without
+    needing the clusterer to discover it first. Synthesises a start/stop
+    cluster pair so the existing event matcher will attribute future events.
+    """
+    if body.power_w <= 0:
+        raise HTTPException(status_code=400, detail="power_w must be > 0")
+
+    # If per-channel split isn't given, dump it all on channel B (L2 — typical
+    # default for split-phase setups). If only two of three are given, put the
+    # remainder on the unspecified channel.
+    a = body.channel_a_power_w
+    b = body.channel_b_power_w
+    c = body.channel_c_power_w
+    specified = sum(x or 0.0 for x in (a, b, c))
+    unspecified_count = sum(1 for x in (a, b, c) if x is None)
+    if unspecified_count == 3:
+        a, b, c = 0.0, body.power_w, 0.0
+    else:
+        remainder = body.power_w - specified
+        per_unspec = remainder / unspecified_count if unspecified_count else 0.0
+        a = a if a is not None else per_unspec
+        b = b if b is not None else per_unspec
+        c = c if c is not None else per_unspec
+
+    pf = float(body.power_factor or 1.0)
+    # Synthetic std: 10% of magnitude with a 20W floor — keeps the matcher's
+    # tolerance reasonable across small and large appliances.
+    std_w = max(body.power_w * 0.10, 20.0)
+    now = time.time()
+
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO devices (name, notes, created_ts, is_on, mean_power_w, total_energy_wh) "
+            "VALUES (?,?,?,0,?,0)",
+            (body.name, body.notes, now, body.power_w),
+        )
+        device_id = cur.lastrowid
+
+        # Start cluster (positive sign)
+        cur.execute(
+            """INSERT INTO clusters
+            (created_ts, updated_ts, mean_power, std_power,
+             mean_a_power, mean_b_power, mean_c_power, mean_pf, sample_count, device_id)
+            VALUES (?,?,?,?,?,?,?,?,1,?)""",
+            (now, now, body.power_w, std_w, a, b, c, pf, device_id),
+        )
+        # Stop cluster (negative sign)
+        cur.execute(
+            """INSERT INTO clusters
+            (created_ts, updated_ts, mean_power, std_power,
+             mean_a_power, mean_b_power, mean_c_power, mean_pf, sample_count, device_id)
+            VALUES (?,?,?,?,?,?,?,?,1,?)""",
+            (now, now, -body.power_w, std_w, -a, -b, -c, pf, device_id),
+        )
+
+    publisher.publish_device_discovery(device_id, body.name)
+    return {"id": device_id, "name": body.name, "mean_power_w": body.power_w}
 
 
 class DeviceUpdate(BaseModel):

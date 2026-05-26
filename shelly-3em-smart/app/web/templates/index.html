@@ -65,6 +65,10 @@
   <section id="tab-devices" class="tab-panel">
     <h2>Known Devices</h2>
     <p class="muted">Devices you've labelled. Live state updates as the inferrer matches events.</p>
+    <div class="actions">
+      <button id="manual-add-btn" class="primary">+ Add device manually</button>
+      <span class="muted">Use when you see a load right now and want to capture it without waiting for clustering.</span>
+    </div>
     <div id="devices-list" class="list"></div>
   </section>
 
@@ -72,8 +76,10 @@
   <section id="tab-clusters" class="tab-panel">
     <h2>Unlabeled Clusters</h2>
     <p class="muted">
-      Auto-discovered groups of similar power-step events. Each cluster is a probable
-      appliance. Label one to start tracking it as a device.
+      Auto-discovered groups of similar power-step events. Each appliance produces
+      <em>two</em> clusters: a <b>Start</b> cluster (events that turn it on) and a
+      <b>Stop</b> cluster (events that turn it off). Label either one — the other
+      is auto-linked to the same device.
     </p>
     <div class="actions">
       <button id="recluster-btn">Re-run clustering now</button>
@@ -109,6 +115,27 @@
     <div class="modal-actions">
       <button id="modal-cancel">Cancel</button>
       <button id="modal-save" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Manual add modal -->
+<div id="modal-manual" class="modal hidden">
+  <div class="modal-body">
+    <h3>Add device manually</h3>
+    <p class="muted">Useful when you can see a load on the live view right now and want to capture it before the clusterer would. Future events that match this signature will be attributed to this device.</p>
+    <label>Name <input id="manual-name" placeholder="e.g. AC compressor" /></label>
+    <label>Total power (W) <input id="manual-power" type="number" min="1" step="1" placeholder="e.g. 3600" /></label>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;">
+      <label>{{ channel_a }} (W) <input id="manual-power-a" type="number" step="1" placeholder="optional" /></label>
+      <label>{{ channel_b }} (W) <input id="manual-power-b" type="number" step="1" placeholder="optional" /></label>
+      <label>{{ channel_c }} (W) <input id="manual-power-c" type="number" step="1" placeholder="optional" /></label>
+    </div>
+    <p class="muted" style="font-size:0.75rem;margin-top:4px;">Per-leg breakdown is optional. Leave blank and we'll default sensibly. For a 240V appliance, split total roughly evenly between {{ channel_a }} and {{ channel_b }}.</p>
+    <label>Notes <textarea id="manual-notes" rows="2"></textarea></label>
+    <div class="modal-actions">
+      <button id="manual-cancel">Cancel</button>
+      <button id="manual-save" class="primary">Save</button>
     </div>
   </div>
 </div>

@@ -137,19 +137,50 @@
   }
 
   // --- Clusters ---
+  let lastClusters = []; // flat list of all clusters, for modal lookup
+
   async function loadClusters() {
-    const r = await fetch(API + '/clusters?unlabeled_only=true');
-    const clusters = await r.json();
+    const r = await fetch(API + '/cluster_pairs');
+    const { pairs, orphans } = await r.json();
     const root = $('clusters-list');
-    if (!clusters.length) {
-      root.innerHTML = `<div class="empty">No unlabeled clusters yet. The system needs ~${5} similar events to form one. Be patient — the longer it runs, the better.</div>`;
+
+    lastClusters = [];
+    pairs.forEach(p => { lastClusters.push(p.on_cluster, p.off_cluster); });
+    orphans.forEach(o => { lastClusters.push(o.cluster); });
+
+    if (!pairs.length && !orphans.length) {
+      root.innerHTML = `<div class="empty">No unlabeled clusters yet. The system needs ~5 similar events to form one. Be patient — the longer it runs, the better.</div>`;
       return;
     }
-    root.innerHTML = clusters.map(c => {
+
+    const pairRows = pairs.map(p => {
+      const on = p.on_cluster, off = p.off_cluster;
+      const w = Math.round(p.mean_power_w);
+      return `
+      <div class="list-item">
+        <div class="dir on" title="Auto-paired start + stop clusters. Labelling here links both to one device.">Pair</div>
+        <div>
+          <div class="name">~${w} W appliance <span class="muted">(${p.total_events} events)</span></div>
+          <div class="meta">
+            <span>${cfg.channelA}: ${Math.round((on.mean_a_power - off.mean_a_power)/2)} W</span>
+            <span>${cfg.channelB}: ${Math.round((on.mean_b_power - off.mean_b_power)/2)} W</span>
+            <span>${cfg.channelC}: ${Math.round((on.mean_c_power - off.mean_c_power)/2)} W</span>
+            <span>pf ${Number(on.mean_pf || 0).toFixed(2)}</span>
+            <span>start: ${on.sample_count}</span>
+            <span>stop: ${off.sample_count}</span>
+          </div>
+        </div>
+        <button class="primary" data-label="${on.id}">Label</button>
+      </div>`;
+    }).join('');
+
+    const orphanRows = orphans.map(o => {
+      const c = o.cluster;
+      const label = c.mean_power > 0 ? 'Start' : 'Stop';
       const dir = c.mean_power > 0 ? 'on' : 'off';
       return `
       <div class="list-item">
-        <div class="dir ${dir}">${dir.toUpperCase()}</div>
+        <div class="dir ${dir}" title="Couldn't find a confident pair. Labelling will still work but the matcher only catches one direction.">${label}</div>
         <div>
           <div class="name">~${Math.abs(Math.round(c.mean_power))} W <span class="muted">(± ${Math.round(c.std_power)})</span></div>
           <div class="meta">
@@ -163,8 +194,13 @@
         <button class="primary" data-label="${c.id}">Label</button>
       </div>`;
     }).join('');
+
+    const pairHeader = pairs.length ? '<h3 style="margin:8px 0 4px;font-size:0.9rem;color:var(--fg-dim);">Probable appliances (start + stop paired)</h3>' : '';
+    const orphanHeader = orphans.length ? '<h3 style="margin:16px 0 4px;font-size:0.9rem;color:var(--fg-dim);">Unpaired clusters</h3>' : '';
+
+    root.innerHTML = pairHeader + pairRows + orphanHeader + orphanRows;
     root.querySelectorAll('[data-label]').forEach(b => {
-      b.addEventListener('click', () => openLabelModal(b.dataset.label, clusters.find(c => c.id == b.dataset.label)));
+      b.addEventListener('click', () => openLabelModal(b.dataset.label, lastClusters.find(c => c.id == b.dataset.label)));
     });
   }
 
@@ -201,8 +237,49 @@
     if (r.ok) {
       $('modal').classList.add('hidden');
       loadClusters();
+      loadDevices();
     } else {
       alert('Failed to save device');
+    }
+  });
+
+  // --- Manual add modal ---
+  function openManualModal() {
+    ['manual-name', 'manual-power', 'manual-power-a', 'manual-power-b', 'manual-power-c', 'manual-notes']
+      .forEach(id => { $(id).value = ''; });
+    $('modal-manual').classList.remove('hidden');
+    $('manual-name').focus();
+  }
+  $('manual-add-btn').addEventListener('click', openManualModal);
+  $('manual-cancel').addEventListener('click', () => $('modal-manual').classList.add('hidden'));
+  $('manual-save').addEventListener('click', async () => {
+    const name = $('manual-name').value.trim();
+    const powerW = parseFloat($('manual-power').value);
+    if (!name) { alert('Name required'); return; }
+    if (!powerW || powerW <= 0) { alert('Total power (W) must be positive'); return; }
+    const num = (id) => {
+      const v = $(id).value.trim();
+      return v === '' ? null : parseFloat(v);
+    };
+    const body = {
+      name,
+      notes: $('manual-notes').value.trim() || null,
+      power_w: powerW,
+      channel_a_power_w: num('manual-power-a'),
+      channel_b_power_w: num('manual-power-b'),
+      channel_c_power_w: num('manual-power-c'),
+    };
+    const r = await fetch(API + '/devices/manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (r.ok) {
+      $('modal-manual').classList.add('hidden');
+      loadDevices();
+    } else {
+      const err = await r.json().catch(() => ({}));
+      alert('Failed to create device: ' + (err.detail || 'unknown error'));
     }
   });
 
