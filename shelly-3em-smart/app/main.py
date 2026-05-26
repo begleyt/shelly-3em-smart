@@ -13,10 +13,10 @@ from .api import router as api_router
 from .clusterer import cluster_loop
 from .config import settings
 from .db import init_db, insert_event, insert_sample, prune_old_samples
-from .event_detector import StepEventDetector
 from .inference import match_event_to_device
 from .mqtt_publisher import publisher
 from .shelly_client import run_websocket_loop
+from .state import state
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,19 +27,18 @@ log = logging.getLogger("shelly3em")
 templates = Jinja2Templates(directory="app/web/templates")
 
 
-class AppState:
-    def __init__(self) -> None:
-        self.detector = StepEventDetector()
-        self.last_sample: dict = {}
-        self.last_persist_ts: float = 0.0
-        self.last_prune_ts: float = 0.0
-
-
-state = AppState()
-
-
 async def on_sample(sample: dict) -> None:
     state.last_sample = sample
+
+    if not state.first_sample_logged:
+        log.info(
+            "First sample from Shelly: total=%.1fW A=%.1fW B=%.1fW C=%.1fW",
+            sample.get("total_power") or 0.0,
+            sample.get("a_power") or 0.0,
+            sample.get("b_power") or 0.0,
+            sample.get("c_power") or 0.0,
+        )
+        state.first_sample_logged = True
 
     # Downsample raw samples to disk
     if sample["ts"] - state.last_persist_ts >= settings.sample_downsample_s:

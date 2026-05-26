@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from .clusterer import run_clustering
 from .db import cursor
 from .mqtt_publisher import publisher
+from .state import state
 
 router = APIRouter()
 
@@ -19,6 +20,9 @@ def _dict_row(cur, row):
 
 @router.get("/api/live")
 def live():
+    # Prefer in-memory state (sub-second freshness) over the downsampled DB.
+    if state.last_sample:
+        return state.last_sample
     with cursor() as cur:
         cur.row_factory = _dict_row
         cur.execute("SELECT * FROM samples ORDER BY ts DESC LIMIT 1")
