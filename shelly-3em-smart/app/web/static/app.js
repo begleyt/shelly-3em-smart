@@ -247,6 +247,7 @@
   function openManualModal() {
     ['manual-name', 'manual-power', 'manual-power-a', 'manual-power-b', 'manual-power-c', 'manual-notes']
       .forEach(id => { $(id).value = ''; });
+    $('manual-currently-on').checked = false;
     $('modal-manual').classList.remove('hidden');
     $('manual-name').focus();
   }
@@ -268,6 +269,7 @@
       channel_a_power_w: num('manual-power-a'),
       channel_b_power_w: num('manual-power-b'),
       channel_c_power_w: num('manual-power-c'),
+      currently_on: $('manual-currently-on').checked,
     };
     const r = await fetch(API + '/devices/manual', {
       method: 'POST',
@@ -275,8 +277,13 @@
       body: JSON.stringify(body)
     });
     if (r.ok) {
+      const result = await r.json();
       $('modal-manual').classList.add('hidden');
       loadDevices();
+      if (result.matched_history_events) {
+        // Quick toast-ish indicator in the recluster-status row (cheap reuse).
+        console.log(`Linked ${result.matched_history_events} historic events to ${result.name}`);
+      }
     } else {
       const err = await r.json().catch(() => ({}));
       alert('Failed to create device: ' + (err.detail || 'unknown error'));

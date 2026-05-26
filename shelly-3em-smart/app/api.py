@@ -18,7 +18,7 @@ router = APIRouter()
 @router.get("/api/info")
 def info():
     return {
-        "version": "0.1.7",
+        "version": "0.1.8",
         "shelly_host": settings.shelly_host,
         "channel_a_label": settings.channel_a_label,
         "channel_b_label": settings.channel_b_label,
@@ -348,20 +348,66 @@ class DeviceManualCreate(BaseModel):
     channel_b_power_w: Optional[float] = None
     channel_c_power_w: Optional[float] = None
     power_factor: Optional[float] = 1.0
+    currently_on: bool = False
+
+
+def _retroactive_match_events(
+    cur,
+    device_id: int,
+    mean_power_w: float,
+    a: float,
+    b: float,
+    c: float,
+    std_w: float,
+    lookback_s: int = 86400,
+) -> int:
+    """Tag previously-unmatched events from the last `lookback_s` seconds whose
+    signature fits this device. Lets manually-added appliances pick up history
+    that the clusterer may have already detected but couldn't attribute."""
+    cutoff = time.time() - lookback_s
+    cur.execute(
+        """SELECT id, delta_power, delta_a_power, delta_b_power, delta_c_power
+           FROM events
+           WHERE device_id IS NULL
+             AND ts >= ?
+             AND ABS(delta_power) BETWEEN ? AND ?""",
+        (cutoff, mean_power_w * 0.3, mean_power_w * 3.0),
+    )
+    candidates = cur.fetchall()
+    if not candidates:
+        return 0
+
+    tol = max(std_w, 25.0) ** 2 * 4.0
+    linked: list[int] = []
+    for ev in candidates:
+        score = (
+            (abs(ev["delta_power"]) - mean_power_w) ** 2
+            + (abs(ev["delta_a_power"]) - abs(a)) ** 2 * 0.5
+            + (abs(ev["delta_b_power"]) - abs(b)) ** 2 * 0.5
+            + (abs(ev["delta_c_power"]) - abs(c)) ** 2 * 0.5
+        )
+        if score <= tol:
+            linked.append(int(ev["id"]))
+
+    if linked:
+        placeholders = ",".join(["?"] * len(linked))
+        cur.execute(
+            f"UPDATE events SET device_id = ? WHERE id IN ({placeholders})",
+            (device_id, *linked),
+        )
+    return len(linked)
 
 
 @router.post("/api/devices/manual")
 def create_device_manual(body: DeviceManualCreate):
     """Create a device directly from a user-specified signature, without
     needing the clusterer to discover it first. Synthesises a start/stop
-    cluster pair so the existing event matcher will attribute future events.
+    cluster pair so the existing event matcher will attribute future events,
+    then scans the last 24h of unmatched events for retroactive history.
     """
     if body.power_w <= 0:
         raise HTTPException(status_code=400, detail="power_w must be > 0")
 
-    # If per-channel split isn't given, dump it all on channel B (L2 — typical
-    # default for split-phase setups). If only two of three are given, put the
-    # remainder on the unspecified channel.
     a = body.channel_a_power_w
     b = body.channel_b_power_w
     c = body.channel_c_power_w
@@ -377,12 +423,12 @@ def create_device_manual(body: DeviceManualCreate):
         c = c if c is not None else per_unspec
 
     pf = float(body.power_factor or 1.0)
-    # Synthetic std: 10% of magnitude with a 20W floor — keeps the matcher's
-    # tolerance reasonable across small and large appliances.
     std_w = max(body.power_w * 0.10, 20.0)
     now = time.time()
 
     with cursor() as cur:
+        cur.row_factory = _dict_row
+
         cur.execute(
             "INSERT INTO devices (name, notes, created_ts, is_on, mean_power_w, total_energy_wh) "
             "VALUES (?,?,?,0,?,0)",
@@ -390,7 +436,6 @@ def create_device_manual(body: DeviceManualCreate):
         )
         device_id = cur.lastrowid
 
-        # Start cluster (positive sign)
         cur.execute(
             """INSERT INTO clusters
             (created_ts, updated_ts, mean_power, std_power,
@@ -398,7 +443,6 @@ def create_device_manual(body: DeviceManualCreate):
             VALUES (?,?,?,?,?,?,?,?,1,?)""",
             (now, now, body.power_w, std_w, a, b, c, pf, device_id),
         )
-        # Stop cluster (negative sign)
         cur.execute(
             """INSERT INTO clusters
             (created_ts, updated_ts, mean_power, std_power,
@@ -407,8 +451,27 @@ def create_device_manual(body: DeviceManualCreate):
             (now, now, -body.power_w, std_w, -a, -b, -c, pf, device_id),
         )
 
+        matched_count = _retroactive_match_events(cur, device_id, body.power_w, a, b, c, std_w)
+        _recompute_device_state(cur, device_id, body.power_w)
+
+        # If user says it's on right now and the event replay didn't already
+        # leave it on, force it on. They can see the appliance — trust them.
+        if body.currently_on:
+            cur.execute("SELECT is_on FROM devices WHERE id = ?", (device_id,))
+            row = cur.fetchone()
+            if row and not row.get("is_on"):
+                cur.execute(
+                    "UPDATE devices SET is_on = 1, last_on_ts = ? WHERE id = ?",
+                    (now, device_id),
+                )
+
     publisher.publish_device_discovery(device_id, body.name)
-    return {"id": device_id, "name": body.name, "mean_power_w": body.power_w}
+    return {
+        "id": device_id,
+        "name": body.name,
+        "mean_power_w": body.power_w,
+        "matched_history_events": matched_count,
+    }
 
 
 class DeviceUpdate(BaseModel):
