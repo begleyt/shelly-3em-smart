@@ -22,10 +22,19 @@ and exposes them inside Home Assistant.
 6. Open the add-on's **Web UI** button — the dashboard appears as a sidebar
    panel inside Home Assistant (via ingress).
 
-If you have the **Mosquitto broker** add-on installed, the add-on auto-detects
-it and publishes every labelled appliance as a `binary_sensor`, plus per-leg
-power/current sensors, via Home Assistant's MQTT discovery — no extra
-configuration needed.
+### Home Assistant MQTT integration
+
+MQTT discovery is **off by default**. To turn it on, set **`mqtt_enabled: true`**
+in the Configuration tab. Then either:
+
+- **Leave `mqtt_host` blank** — the add-on auto-uses HA's MQTT service (works
+  if you have the official **Mosquitto broker** add-on installed and enabled).
+- **Fill in `mqtt_host` / `mqtt_port` / `mqtt_username` / `mqtt_password`** —
+  the add-on connects to your external broker.
+
+Either way, the add-on publishes every labelled appliance as a `binary_sensor`,
+plus per-leg power/current sensors, via HA's MQTT discovery — entities show up
+automatically with no YAML.
 
 ## What's in this repository
 

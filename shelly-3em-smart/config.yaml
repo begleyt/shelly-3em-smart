@@ -1,5 +1,5 @@
-﻿name: Shelly 3EM Smart Monitor
-version: "0.1.1"
+name: Shelly 3EM Smart Monitor
+version: "0.1.2"
 slug: shelly_3em_smart
 description: >-
   Streams data from a Shelly Pro 3EM, auto-detects appliances from their
@@ -40,6 +40,12 @@ options:
   cluster_eps_w: 25
   sample_retention_days: 30
   sample_downsample_s: 10
+  mqtt_enabled: false
+  mqtt_host: ""
+  mqtt_port: 1883
+  mqtt_username: ""
+  mqtt_password: ""
+  mqtt_discovery_prefix: homeassistant
   log_level: info
 schema:
   shelly_host: str
@@ -54,5 +60,11 @@ schema:
   cluster_eps_w: float(1,500)
   sample_retention_days: int(1,365)
   sample_downsample_s: int(1,300)
+  mqtt_enabled: bool
+  mqtt_host: str?
+  mqtt_port: int(1,65535)
+  mqtt_username: str?
+  mqtt_password: password?
+  mqtt_discovery_prefix: str
   log_level: list(trace|debug|info|notice|warning|error|fatal)
 image: ghcr.io/begleyt/shelly-3em-smart-{arch}
