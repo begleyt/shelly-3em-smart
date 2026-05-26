@@ -1,5 +1,5 @@
 name: Shelly 3EM Smart Monitor
-version: "0.1.3"
+version: "0.1.4"
 slug: shelly_3em_smart
 description: >-
   Streams data from a Shelly Pro 3EM, auto-detects appliances from their
@@ -14,7 +14,7 @@ startup: services
 hassio_role: default
 homeassistant_api: false
 hassio_api: false
-host_network: false
+host_network: true
 ingress: true
 ingress_port: 8080
 panel_icon: mdi:flash-triangle
