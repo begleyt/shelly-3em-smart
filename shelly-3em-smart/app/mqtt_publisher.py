@@ -1,7 +1,6 @@
-import asyncio
 import json
 import logging
-import time
+import socket
 from typing import Optional
 
 from .config import settings
@@ -13,6 +12,19 @@ try:
     HAVE_MQTT = True
 except ImportError:
     HAVE_MQTT = False
+
+
+def _make_client():
+    """Build a paho-mqtt Client that works on both paho-mqtt 1.x and 2.x.
+
+    paho-mqtt 2.x requires `callback_api_version`. We use VERSION1 so our
+    legacy on_connect/on_disconnect signatures remain valid on both APIs.
+    """
+    kwargs = dict(client_id=settings.mqtt_node_id, clean_session=True)
+    try:
+        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, **kwargs)
+    except AttributeError:
+        return mqtt.Client(**kwargs)
 
 
 class MqttPublisher:
@@ -29,16 +41,44 @@ class MqttPublisher:
         if not HAVE_MQTT:
             log.warning("paho-mqtt not installed; MQTT integration disabled")
             return
-        self._client = mqtt.Client(client_id=settings.mqtt_node_id, clean_session=True)
+
+        log.info("MQTT starting: broker=%s:%s user=%s prefix=%s",
+                 settings.mqtt_host, settings.mqtt_port,
+                 settings.mqtt_user or "(none)",
+                 settings.mqtt_discovery_prefix)
+
+        try:
+            self._client = _make_client()
+        except Exception:
+            log.exception("MQTT: failed to construct paho client")
+            return
+
         if settings.mqtt_user:
             self._client.username_pw_set(settings.mqtt_user, settings.mqtt_password or "")
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
+
+        # Try a synchronous connect first so socket/auth errors surface in the
+        # log immediately. If it works, hand off to the background loop which
+        # will keep the connection alive and handle reconnects.
         try:
-            self._client.connect_async(settings.mqtt_host, settings.mqtt_port, keepalive=60)
-            self._client.loop_start()
+            self._client.connect(settings.mqtt_host, settings.mqtt_port, keepalive=60)
+        except socket.gaierror as e:
+            log.error("MQTT: cannot resolve broker hostname '%s': %s", settings.mqtt_host, e)
+            self._client = None
+            return
+        except (ConnectionRefusedError, OSError) as e:
+            log.error("MQTT: cannot reach broker %s:%s — %s",
+                      settings.mqtt_host, settings.mqtt_port, e)
+            self._client = None
+            return
         except Exception:
-            log.exception("MQTT connect failed")
+            log.exception("MQTT: unexpected error connecting to broker")
+            self._client = None
+            return
+
+        self._client.loop_start()
+        log.info("MQTT: connect() returned ok; background loop started")
 
     def stop(self) -> None:
         if self._client is None:
@@ -50,13 +90,17 @@ class MqttPublisher:
             pass
 
     def _on_connect(self, client, userdata, flags, rc):
-        log.info("MQTT connected rc=%s", rc)
+        if rc == 0:
+            log.info("MQTT connected (rc=0)")
+        else:
+            log.error("MQTT connect rejected (rc=%s): %s", rc, _rc_meaning(rc))
         self._connected = (rc == 0)
         if self._connected:
             self._publish_sensor_discovery()
 
     def _on_disconnect(self, client, userdata, rc):
-        log.warning("MQTT disconnected rc=%s", rc)
+        if rc != 0:
+            log.warning("MQTT disconnected unexpectedly (rc=%s)", rc)
         self._connected = False
 
     @property
@@ -100,6 +144,8 @@ class MqttPublisher:
                 "device": self._device_block(),
             }
             self._client.publish(topic, json.dumps(payload), retain=True)
+        log.info("MQTT: published discovery config for %d sensors under %s/sensor/%s/*",
+                 len(sensors), prefix, node)
         self._discovered_sensors = True
 
     def publish_device_discovery(self, device_id: int, name: str) -> None:
@@ -121,6 +167,7 @@ class MqttPublisher:
             "device": self._device_block(),
         }
         self._client.publish(topic, json.dumps(payload), retain=True)
+        log.info("MQTT: published discovery config for device %d (%s)", device_id, name)
         self._discovered_devices.add(device_id)
 
     def publish_state(self, sample: dict) -> None:
@@ -137,6 +184,16 @@ class MqttPublisher:
         if not self._connected or not self._client:
             return
         self._client.publish(f"{self.base_topic}/device/{device_id}/state", state, retain=True)
+
+
+def _rc_meaning(rc: int) -> str:
+    return {
+        1: "incorrect protocol version",
+        2: "invalid client identifier",
+        3: "server unavailable",
+        4: "bad username or password",
+        5: "not authorized",
+    }.get(rc, f"code {rc}")
 
 
 publisher = MqttPublisher()
