@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<base href="./" />
+<title>Shelly 3EM Smart Monitor</title>
+<link rel="stylesheet" href="static/app.css" />
+</head>
+<body>
+<header>
+  <h1>Shelly 3EM Smart Monitor</h1>
+  <div class="meta">
+    <span>Shelly: <code>{{ shelly_host }}</code></span>
+    <span>MQTT: {% if mqtt_enabled %}<span class="ok">enabled</span>{% else %}<span class="muted">off</span>{% endif %}</span>
+    <span id="conn-indicator" class="muted">connecting…</span>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="live">Live</button>
+  <button class="tab" data-tab="devices">Devices</button>
+  <button class="tab" data-tab="clusters">Unlabeled Clusters</button>
+  <button class="tab" data-tab="history">History</button>
+</nav>
+
+<main>
+  <!-- LIVE -->
+  <section id="tab-live" class="tab-panel active">
+    <div class="cards">
+      <div class="card big">
+        <div class="card-label">Total Power</div>
+        <div class="card-value"><span id="total-power">—</span> <span class="unit">W</span></div>
+        <div class="card-sub"><span id="total-current">—</span> A</div>
+      </div>
+      <div class="card">
+        <div class="card-label">{{ channel_a }}</div>
+        <div class="card-value"><span id="a-power">—</span> <span class="unit">W</span></div>
+        <div class="card-sub"><span id="a-current">—</span> A · <span id="a-voltage">—</span> V · pf <span id="a-pf">—</span></div>
+      </div>
+      <div class="card">
+        <div class="card-label">{{ channel_b }}</div>
+        <div class="card-value"><span id="b-power">—</span> <span class="unit">W</span></div>
+        <div class="card-sub"><span id="b-current">—</span> A · <span id="b-voltage">—</span> V · pf <span id="b-pf">—</span></div>
+      </div>
+      <div class="card">
+        <div class="card-label">{{ channel_c }}</div>
+        <div class="card-value"><span id="c-power">—</span> <span class="unit">W</span></div>
+        <div class="card-sub"><span id="c-current">—</span> A · <span id="c-voltage">—</span> V · pf <span id="c-pf">—</span></div>
+      </div>
+    </div>
+
+    <div class="card chart-card">
+      <div class="card-label">Last 30 minutes</div>
+      <canvas id="live-chart" height="220"></canvas>
+    </div>
+
+    <div class="card stats-card">
+      <div class="card-label">System</div>
+      <div id="stats" class="stats"></div>
+    </div>
+  </section>
+
+  <!-- DEVICES -->
+  <section id="tab-devices" class="tab-panel">
+    <h2>Known Devices</h2>
+    <p class="muted">Devices you've labelled. Live state updates as the inferrer matches events.</p>
+    <div id="devices-list" class="list"></div>
+  </section>
+
+  <!-- CLUSTERS -->
+  <section id="tab-clusters" class="tab-panel">
+    <h2>Unlabeled Clusters</h2>
+    <p class="muted">
+      Auto-discovered groups of similar power-step events. Each cluster is a probable
+      appliance. Label one to start tracking it as a device.
+    </p>
+    <div class="actions">
+      <button id="recluster-btn">Re-run clustering now</button>
+      <span id="recluster-status" class="muted"></span>
+    </div>
+    <div id="clusters-list" class="list"></div>
+  </section>
+
+  <!-- HISTORY -->
+  <section id="tab-history" class="tab-panel">
+    <h2>History</h2>
+    <div class="actions">
+      <label>Window:
+        <select id="history-window">
+          <option value="60">1 hour</option>
+          <option value="360">6 hours</option>
+          <option value="1440" selected>24 hours</option>
+          <option value="10080">7 days</option>
+        </select>
+      </label>
+    </div>
+    <canvas id="history-chart" height="280"></canvas>
+  </section>
+</main>
+
+<!-- Label modal -->
+<div id="modal" class="modal hidden">
+  <div class="modal-body">
+    <h3>Label this cluster as a device</h3>
+    <div id="modal-cluster-info" class="muted"></div>
+    <label>Name <input id="modal-name" placeholder="e.g. Well pump" /></label>
+    <label>Notes <textarea id="modal-notes" rows="2"></textarea></label>
+    <div class="modal-actions">
+      <button id="modal-cancel">Cancel</button>
+      <button id="modal-save" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+  window.APP_CONFIG = {
+    channelA: {{ channel_a | tojson }},
+    channelB: {{ channel_b | tojson }},
+    channelC: {{ channel_c | tojson }},
+  };
+</script>
+<script src="static/app.js"></script>
+</body>
+</html>

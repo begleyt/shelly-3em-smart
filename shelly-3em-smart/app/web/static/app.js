@@ -1,0 +1,259 @@
+(() => {
+  const cfg = window.APP_CONFIG || {};
+  const $ = (id) => document.getElementById(id);
+  const API = 'api';
+
+  // --- Tabs ---
+  document.querySelectorAll('.tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      $('tab-' + btn.dataset.tab).classList.add('active');
+      if (btn.dataset.tab === 'devices') loadDevices();
+      if (btn.dataset.tab === 'clusters') loadClusters();
+      if (btn.dataset.tab === 'history') loadHistory();
+    });
+  });
+
+  // --- Live updates ---
+  const liveBuf = [];
+  let liveChart;
+
+  function fmt(n, digits = 0) {
+    if (n === null || n === undefined) return '—';
+    return Number(n).toFixed(digits);
+  }
+
+  function initLiveChart() {
+    const ctx = $('live-chart').getContext('2d');
+    liveChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [
+          { label: cfg.channelA, data: [], borderColor: '#4cc9f0', tension: 0.2, pointRadius: 0 },
+          { label: cfg.channelB, data: [], borderColor: '#f72585', tension: 0.2, pointRadius: 0 },
+          { label: cfg.channelC, data: [], borderColor: '#7fd06b', tension: 0.2, pointRadius: 0 },
+          { label: 'Total', data: [], borderColor: '#e6e9ef', borderWidth: 2, tension: 0.2, pointRadius: 0 },
+        ]
+      },
+      options: {
+        responsive: true,
+        animation: false,
+        scales: {
+          y: { ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' }, title: { display: true, text: 'Watts', color: '#8a93a6' } },
+          x: { ticks: { color: '#8a93a6', maxTicksLimit: 8 }, grid: { color: '#2a3340' } }
+        },
+        plugins: { legend: { labels: { color: '#e6e9ef' } } }
+      }
+    });
+  }
+
+  async function pollLive() {
+    try {
+      const r = await fetch(API + '/live');
+      if (!r.ok) throw new Error('bad status');
+      const s = await r.json();
+      $('conn-indicator').textContent = 'live';
+      $('conn-indicator').className = 'ok';
+
+      $('total-power').textContent = fmt(s.total_power);
+      $('total-current').textContent = fmt(s.total_current, 2);
+      $('a-power').textContent = fmt(s.a_power);
+      $('b-power').textContent = fmt(s.b_power);
+      $('c-power').textContent = fmt(s.c_power);
+      $('a-current').textContent = fmt(s.a_current, 2);
+      $('b-current').textContent = fmt(s.b_current, 2);
+      $('c-current').textContent = fmt(s.c_current, 2);
+      $('a-voltage').textContent = fmt(s.a_voltage, 1);
+      $('b-voltage').textContent = fmt(s.b_voltage, 1);
+      $('c-voltage').textContent = fmt(s.c_voltage, 1);
+      $('a-pf').textContent = fmt(s.a_pf, 2);
+      $('b-pf').textContent = fmt(s.b_pf, 2);
+      $('c-pf').textContent = fmt(s.c_pf, 2);
+
+      if (s.ts) {
+        const t = new Date(s.ts * 1000).toLocaleTimeString();
+        liveBuf.push({ t, a: s.a_power, b: s.b_power, c: s.c_power, total: s.total_power });
+        if (liveBuf.length > 180) liveBuf.shift();
+        liveChart.data.labels = liveBuf.map(p => p.t);
+        liveChart.data.datasets[0].data = liveBuf.map(p => p.a);
+        liveChart.data.datasets[1].data = liveBuf.map(p => p.b);
+        liveChart.data.datasets[2].data = liveBuf.map(p => p.c);
+        liveChart.data.datasets[3].data = liveBuf.map(p => p.total);
+        liveChart.update('none');
+      }
+    } catch (e) {
+      $('conn-indicator').textContent = 'disconnected';
+      $('conn-indicator').className = 'warn';
+    }
+  }
+
+  async function pollStats() {
+    try {
+      const r = await fetch(API + '/stats');
+      const s = await r.json();
+      const firstTs = s.first_sample_ts ? new Date(s.first_sample_ts * 1000).toLocaleString() : '—';
+      $('stats').innerHTML = `
+        <div><span>Samples</span><span>${s.samples.toLocaleString()}</span></div>
+        <div><span>Events</span><span>${s.events.toLocaleString()}</span></div>
+        <div><span>Devices</span><span>${s.devices}</span></div>
+        <div><span>Unlabeled clusters</span><span>${s.unlabeled_clusters}</span></div>
+        <div><span>Recording since</span><span>${firstTs}</span></div>
+      `;
+    } catch {}
+  }
+
+  // --- Devices ---
+  async function loadDevices() {
+    const r = await fetch(API + '/devices');
+    const devices = await r.json();
+    const root = $('devices-list');
+    if (!devices.length) {
+      root.innerHTML = `<div class="empty">No devices yet. Label a cluster to start tracking one.</div>`;
+      return;
+    }
+    root.innerHTML = devices.map(d => `
+      <div class="list-item">
+        <div class="device-state ${d.is_on ? 'on' : ''}">${d.is_on ? 'ON' : 'OFF'}</div>
+        <div>
+          <div class="name">${escapeHtml(d.name)}</div>
+          <div class="meta">
+            ${d.notes ? escapeHtml(d.notes) + ' · ' : ''}
+            ${d.last_on_ts ? 'last on ' + new Date(d.last_on_ts * 1000).toLocaleString() : 'never seen on'}
+          </div>
+        </div>
+        <button class="danger" data-del="${d.id}">Delete</button>
+      </div>
+    `).join('');
+    root.querySelectorAll('[data-del]').forEach(b => {
+      b.addEventListener('click', async () => {
+        if (!confirm('Delete this device? The cluster will become unlabeled again.')) return;
+        await fetch(API + '/devices/' + b.dataset.del, { method: 'DELETE' });
+        loadDevices();
+      });
+    });
+  }
+
+  // --- Clusters ---
+  async function loadClusters() {
+    const r = await fetch(API + '/clusters?unlabeled_only=true');
+    const clusters = await r.json();
+    const root = $('clusters-list');
+    if (!clusters.length) {
+      root.innerHTML = `<div class="empty">No unlabeled clusters yet. The system needs ~${5} similar events to form one. Be patient — the longer it runs, the better.</div>`;
+      return;
+    }
+    root.innerHTML = clusters.map(c => {
+      const dir = c.mean_power > 0 ? 'on' : 'off';
+      return `
+      <div class="list-item">
+        <div class="dir ${dir}">${dir.toUpperCase()}</div>
+        <div>
+          <div class="name">~${Math.abs(Math.round(c.mean_power))} W <span class="muted">(± ${Math.round(c.std_power)})</span></div>
+          <div class="meta">
+            <span>${cfg.channelA}: ${Math.round(c.mean_a_power)} W</span>
+            <span>${cfg.channelB}: ${Math.round(c.mean_b_power)} W</span>
+            <span>${cfg.channelC}: ${Math.round(c.mean_c_power)} W</span>
+            <span>pf ${Number(c.mean_pf || 0).toFixed(2)}</span>
+            <span>${c.sample_count} events</span>
+          </div>
+        </div>
+        <button class="primary" data-label="${c.id}">Label</button>
+      </div>`;
+    }).join('');
+    root.querySelectorAll('[data-label]').forEach(b => {
+      b.addEventListener('click', () => openLabelModal(b.dataset.label, clusters.find(c => c.id == b.dataset.label)));
+    });
+  }
+
+  $('recluster-btn').addEventListener('click', async () => {
+    $('recluster-status').textContent = 'running…';
+    const r = await fetch(API + '/recluster', { method: 'POST' });
+    const j = await r.json();
+    $('recluster-status').textContent = `found ${j.on} on-clusters, ${j.off} off-clusters`;
+    loadClusters();
+  });
+
+  // --- Label modal ---
+  let modalClusterId = null;
+  function openLabelModal(clusterId, cluster) {
+    modalClusterId = clusterId;
+    $('modal-cluster-info').textContent = cluster
+      ? `Cluster #${cluster.id}: ~${Math.abs(Math.round(cluster.mean_power))} W, ${cluster.sample_count} matching events`
+      : '';
+    $('modal-name').value = '';
+    $('modal-notes').value = '';
+    $('modal').classList.remove('hidden');
+    $('modal-name').focus();
+  }
+  $('modal-cancel').addEventListener('click', () => $('modal').classList.add('hidden'));
+  $('modal-save').addEventListener('click', async () => {
+    const name = $('modal-name').value.trim();
+    if (!name) { alert('Name required'); return; }
+    const notes = $('modal-notes').value.trim() || null;
+    const r = await fetch(API + '/devices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, notes, cluster_id: parseInt(modalClusterId) })
+    });
+    if (r.ok) {
+      $('modal').classList.add('hidden');
+      loadClusters();
+    } else {
+      alert('Failed to save device');
+    }
+  });
+
+  // --- History ---
+  let historyChart;
+  async function loadHistory() {
+    const minutes = parseInt($('history-window').value);
+    const r = await fetch(API + '/history?minutes=' + minutes);
+    const data = await r.json();
+    const labels = data.map(d => new Date(d.ts * 1000).toLocaleTimeString());
+    const cfg2 = {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: cfg.channelA, data: data.map(d => d.a_power), borderColor: '#4cc9f0', tension: 0.2, pointRadius: 0 },
+          { label: cfg.channelB, data: data.map(d => d.b_power), borderColor: '#f72585', tension: 0.2, pointRadius: 0 },
+          { label: cfg.channelC, data: data.map(d => d.c_power), borderColor: '#7fd06b', tension: 0.2, pointRadius: 0 },
+          { label: 'Total', data: data.map(d => d.total_power), borderColor: '#e6e9ef', borderWidth: 2, tension: 0.2, pointRadius: 0 },
+        ]
+      },
+      options: {
+        responsive: true,
+        animation: false,
+        scales: {
+          y: { ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' }, title: { display: true, text: 'Watts', color: '#8a93a6' } },
+          x: { ticks: { color: '#8a93a6', maxTicksLimit: 12 }, grid: { color: '#2a3340' } }
+        },
+        plugins: { legend: { labels: { color: '#e6e9ef' } } }
+      }
+    };
+    if (historyChart) historyChart.destroy();
+    historyChart = new Chart($('history-chart'), cfg2);
+  }
+  $('history-window').addEventListener('change', loadHistory);
+
+  // --- utils ---
+  function escapeHtml(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[c]);
+  }
+
+  // --- boot ---
+  initLiveChart();
+  pollLive();
+  pollStats();
+  setInterval(pollLive, 1500);
+  setInterval(pollStats, 15000);
+  setInterval(() => {
+    if (document.querySelector('.tab.active').dataset.tab === 'devices') loadDevices();
+  }, 5000);
+})();

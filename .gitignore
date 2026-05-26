@@ -1,0 +1,15 @@
+# Runtime data (created by docker-compose standalone mode)
+shelly-3em-smart/data/*.db
+shelly-3em-smart/data/*.db-wal
+shelly-3em-smart/data/*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+
+# OS
+.DS_Store
+Thumbs.db

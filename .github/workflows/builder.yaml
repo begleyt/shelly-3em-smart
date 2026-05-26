@@ -1,0 +1,52 @@
+name: Build add-on
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "shelly-3em-smart/**"
+      - ".github/workflows/builder.yaml"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  ADDON_PATH: shelly-3em-smart
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, aarch64]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Read add-on metadata
+        id: meta
+        run: |
+          version="$(grep -E '^version:' ${{ env.ADDON_PATH }}/config.yaml | awk '{print $2}' | tr -d '\"')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build add-on (${{ matrix.arch }})
+        uses: home-assistant/builder@2024.08.2
+        with:
+          args: |
+            --${{ matrix.arch }} \
+            --target ${{ env.ADDON_PATH }} \
+            --image "ghcr.io/${{ github.repository_owner }}/shelly-3em-smart-{arch}" \
+            --version "${{ steps.meta.outputs.version }}" \
+            --docker-hub ghcr.io

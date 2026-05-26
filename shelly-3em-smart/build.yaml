@@ -1,0 +1,8 @@
+﻿build_from:
+  amd64: ghcr.io/home-assistant/amd64-base-debian:bookworm
+  aarch64: ghcr.io/home-assistant/aarch64-base-debian:bookworm
+labels:
+  org.opencontainers.image.title: "Shelly 3EM Smart Monitor"
+  org.opencontainers.image.description: "NILM appliance detection from a Shelly Pro 3EM"
+  org.opencontainers.image.source: "https://github.com/begleyt/shelly-3em-smart"
+  org.opencontainers.image.licenses: "MIT"

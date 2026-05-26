@@ -1,0 +1,58 @@
+﻿name: Shelly 3EM Smart Monitor
+version: "0.1.0"
+slug: shelly_3em_smart
+description: >-
+  Streams data from a Shelly Pro 3EM, auto-detects appliances from their
+  power signatures, and exposes them to Home Assistant as binary sensors.
+url: https://github.com/begleyt/shelly-3em-smart
+arch:
+  - amd64
+  - aarch64
+init: false
+boot: auto
+startup: services
+hassio_role: default
+homeassistant_api: false
+hassio_api: false
+host_network: false
+ingress: true
+ingress_port: 8080
+panel_icon: mdi:flash-triangle
+panel_title: 3EM Smart
+ports:
+  8080/tcp: null
+ports_description:
+  8080/tcp: Web UI (only needed if you want to bypass ingress)
+services:
+  - mqtt:want
+map:
+  - share:rw
+options:
+  shelly_host: ""
+  channel_a_label: L1
+  channel_b_label: L2
+  channel_c_label: Spare
+  step_threshold_w: 50
+  step_window_s: 3
+  settle_window_s: 5
+  cluster_interval_s: 3600
+  cluster_min_samples: 5
+  cluster_eps_w: 25
+  sample_retention_days: 30
+  sample_downsample_s: 10
+  log_level: info
+schema:
+  shelly_host: str
+  channel_a_label: str
+  channel_b_label: str
+  channel_c_label: str
+  step_threshold_w: int(10,5000)
+  step_window_s: int(1,30)
+  settle_window_s: int(1,30)
+  cluster_interval_s: int(60,86400)
+  cluster_min_samples: int(2,1000)
+  cluster_eps_w: float(1,500)
+  sample_retention_days: int(1,365)
+  sample_downsample_s: int(1,300)
+  log_level: list(trace|debug|info|notice|warning|error|fatal)
+image: ghcr.io/begleyt/shelly-3em-smart-{arch}

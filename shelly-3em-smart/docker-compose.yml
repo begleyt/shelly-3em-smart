@@ -1,0 +1,41 @@
+services:
+  shelly-3em-smart:
+    build: .
+    image: shelly-3em-smart:latest
+    container_name: shelly-3em-smart
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      # --- Required ---
+      SHELLY_HOST: "192.168.1.50"           # IP of your Shelly Pro 3EM
+
+      # --- Channel labels (US 240V split-phase: A=L1 hot, B=L2 hot, C=optional) ---
+      CHANNEL_A_LABEL: "L1"
+      CHANNEL_B_LABEL: "L2"
+      CHANNEL_C_LABEL: "Spare"
+
+      # --- Detection tuning ---
+      STEP_THRESHOLD_W: "50"                # ignore loads smaller than this
+      STEP_WINDOW_S: "3"
+      SETTLE_WINDOW_S: "5"
+
+      # --- Clustering ---
+      CLUSTER_INTERVAL_S: "3600"            # re-cluster every hour
+      CLUSTER_MIN_SAMPLES: "5"              # min events to form a cluster
+      CLUSTER_EPS_W: "25"                   # similarity radius in watts
+
+      # --- Storage ---
+      DB_PATH: "/data/shelly.db"
+      SAMPLE_RETENTION_DAYS: "30"
+      SAMPLE_DOWNSAMPLE_S: "10"             # persist 1 sample every N seconds
+
+      # --- MQTT for Home Assistant (leave MQTT_HOST empty/unset to disable) ---
+      # MQTT_HOST: "mqtt.example.lan"
+      # MQTT_PORT: "1883"
+      # MQTT_USER: ""
+      # MQTT_PASSWORD: ""
+      # MQTT_DISCOVERY_PREFIX: "homeassistant"
+      # MQTT_NODE_ID: "shelly3em_smart"
