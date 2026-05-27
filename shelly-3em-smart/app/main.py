@@ -107,7 +107,25 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Shelly 3EM Smart Monitor", lifespan=lifespan)
 app.include_router(api_router)
-app.mount("/static", StaticFiles(directory="app/web/static"), name="static")
+
+
+# Single source of truth for the add-on version — also exposed via /api/info
+# and stamped into the dashboard's static asset URLs as a cache-buster.
+APP_VERSION = "0.4.1"
+
+
+# Wrap StaticFiles with no-cache headers so even if the browser still asks
+# for /static/app.js, it gets the fresh bytes — defence-in-depth alongside
+# the query-string cache busting below.
+class NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-store, max-age=0, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        return response
+
+
+app.mount("/static", NoCacheStaticFiles(directory="app/web/static"), name="static")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -121,5 +139,6 @@ def index(request: Request):
             "channel_c": settings.channel_c_label,
             "shelly_host": settings.shelly_host,
             "mqtt_enabled": settings.mqtt_enabled,
+            "version": APP_VERSION,
         },
     )

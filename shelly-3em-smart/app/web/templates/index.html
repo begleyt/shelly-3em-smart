@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <base href="./" />
 <title>Shelly 3EM Smart Monitor</title>
-<link rel="stylesheet" href="static/app.css" />
+<link rel="stylesheet" href="static/app.css?v={{ version }}" />
 </head>
 <body>
 <header>
@@ -302,6 +302,6 @@
     channelC: {{ channel_c | tojson }},
   };
 </script>
-<script src="static/app.js"></script>
+<script src="static/app.js?v={{ version }}"></script>
 </body>
 </html>
