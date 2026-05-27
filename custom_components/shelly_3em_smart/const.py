@@ -8,6 +8,7 @@ DEFAULT_PORT = 8080
 CONF_HOST = "host"
 CONF_PORT = "port"
 CONF_TRACKED_ENTITIES = "tracked_entities"
+CONF_ENERGY_ENTITIES = "energy_entities"
 
 SCAN_INTERVAL = timedelta(seconds=2)
 
@@ -19,3 +20,6 @@ MODEL = "shelly-3em-smart"
 # is the mode (heat_cool), not the running state; users wanting that should
 # create a template binary_sensor mirroring hvac_action.
 TRACKABLE_DOMAINS = ["switch", "light", "fan", "binary_sensor", "input_boolean"]
+
+# Polling interval for energy sensors (HA cumulative kWh entities).
+ENERGY_POLL_INTERVAL_S = 30

@@ -11,6 +11,7 @@ from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    CONF_ENERGY_ENTITIES,
     CONF_HOST,
     CONF_PORT,
     CONF_TRACKED_ENTITIES,
@@ -27,6 +28,16 @@ _LOGGER = logging.getLogger(__name__)
 def _entity_selector():
     return selector.EntitySelector(
         selector.EntitySelectorConfig(multiple=True, domain=TRACKABLE_DOMAINS)
+    )
+
+
+def _energy_entity_selector():
+    return selector.EntitySelector(
+        selector.EntitySelectorConfig(
+            multiple=True,
+            domain="sensor",
+            device_class="energy",
+        )
     )
 
 
@@ -84,12 +95,14 @@ class ShellyAddonOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        current = self.config_entry.options.get(CONF_TRACKED_ENTITIES, [])
+        current_tracked = self.config_entry.options.get(CONF_TRACKED_ENTITIES, [])
+        current_energy = self.config_entry.options.get(CONF_ENERGY_ENTITIES, [])
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
-                    vol.Optional(CONF_TRACKED_ENTITIES, default=current): _entity_selector(),
+                    vol.Optional(CONF_TRACKED_ENTITIES, default=current_tracked): _entity_selector(),
+                    vol.Optional(CONF_ENERGY_ENTITIES,  default=current_energy):  _energy_entity_selector(),
                 }
             ),
         )

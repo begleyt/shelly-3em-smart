@@ -64,6 +64,31 @@ class ShellyAddonClient:
             # state change will retry on its own.
             pass
 
+    async def post_ha_energy_reading(
+        self,
+        entity_id: str,
+        energy_kwh: float,
+        power_w: float | None = None,
+        friendly_name: str | None = None,
+        ts: float | None = None,
+    ) -> None:
+        payload = {
+            "entity_id": entity_id,
+            "energy_kwh": energy_kwh,
+            "power_w": power_w,
+            "friendly_name": friendly_name,
+            "ts": ts,
+        }
+        try:
+            async with self._session.post(
+                f"{self._base}/ha_energy_reading",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as r:
+                r.raise_for_status()
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            pass
+
 
 class ShellyAddonCoordinator(DataUpdateCoordinator[dict]):
     """Polls /api/live and /api/devices every couple of seconds."""

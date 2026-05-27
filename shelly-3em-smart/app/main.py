@@ -111,7 +111,7 @@ app.include_router(api_router)
 
 # Single source of truth for the add-on version — also exposed via /api/info
 # and stamped into the dashboard's static asset URLs as a cache-buster.
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.5.0"
 
 
 # Wrap StaticFiles with no-cache headers so even if the browser still asks

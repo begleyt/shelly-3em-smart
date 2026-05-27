@@ -20,10 +20,11 @@
   "options": {
     "step": {
       "init": {
-        "title": "Tracked entities",
-        "description": "Pick the Home Assistant entities whose on/off transitions you want to use to teach the add-on. Each time one of these entities changes state, its timestamp is sent to the add-on and correlated against detected power-step events. After 3 confident matches, the entity is automatically promoted to a labelled device.",
+        "title": "Tracked entities + energy sensors",
+        "description": "Tracked entities (on/off): when one of these flips, the add-on uses the timestamp to label power-step events. After 3 confident matches, the entity is auto-promoted to a device.\n\nEnergy sensors (kWh): the add-on imports the cumulative reading directly. Each one becomes a 'metered' device with authoritative energy values, so smart plugs with built-in measurement just show up as devices.",
         "data": {
-          "tracked_entities": "Entities to track"
+          "tracked_entities": "On/off entities to teach the matcher",
+          "energy_entities": "Energy sensors to import (sensor.* with device_class: energy)"
         }
       }
     }

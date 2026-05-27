@@ -734,6 +734,7 @@ select {
 .tag.continuous { background: var(--accent-soft); color: var(--accent); }
 .tag.via        { background: var(--bg-elev-3); color: var(--fg-3); font-weight: 500; letter-spacing: 0.02em; text-transform: none; }
 .tag.anomaly    { background: var(--warn-soft); color: var(--warn); }
+.tag.metered    { background: var(--ok-soft); color: var(--ok); }
 
 /* Responsive tweaks */
 @media (max-width: 700px) {

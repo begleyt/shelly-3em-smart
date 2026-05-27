@@ -8,6 +8,7 @@ from .clusterer import run_clustering
 from .config import settings
 from .db import cursor
 from .ha_correlator import record_ha_event
+from .ha_energy import list_energy_sources, record_energy_reading
 from .inference import absorb_unlabeled_clusters
 from .insights import all_device_stats, anomaly_check, device_stats, insights, panel_energy_today, phantom_load
 from .mqtt_publisher import publisher
@@ -21,7 +22,7 @@ router = APIRouter()
 @router.get("/api/info")
 def info():
     return {
-        "version": "0.4.1",
+        "version": "0.5.0",
         "shelly_host": settings.shelly_host,
         "channel_a_label": settings.channel_a_label,
         "channel_b_label": settings.channel_b_label,
@@ -29,6 +30,7 @@ def info():
         "mqtt_enabled": settings.mqtt_enabled,
         "supports_ha_events": True,
         "supports_insights": True,
+        "supports_ha_energy": True,
         "rate_cents_per_kwh": settings.electricity_rate_cents_per_kwh,
         "currency_symbol": settings.currency_symbol,
     }
@@ -133,6 +135,43 @@ def ha_event_log(minutes: int = 60, limit: int = 200):
     except Exception:
         # Defensive: if for any reason the tables aren't populated yet, don't
         # 500 — the dashboard treats an empty list as "no annotations".
+        return []
+
+
+# ---------- HA energy entity import (v0.5.0) ----------
+
+class HaEnergyReading(BaseModel):
+    entity_id: str
+    energy_kwh: float
+    power_w: Optional[float] = None
+    friendly_name: Optional[str] = None
+    ts: Optional[float] = None
+
+
+@router.post("/api/ha_energy_reading")
+def post_ha_energy_reading(body: HaEnergyReading):
+    """The HACS integration calls this every ~30s with the latest reading from
+    each user-selected energy sensor. We track cumulative kWh + a midnight
+    baseline so today's energy can be computed as a delta."""
+    try:
+        return record_energy_reading(
+            entity_id=body.entity_id,
+            energy_kwh=body.energy_kwh,
+            power_w=body.power_w,
+            friendly_name=body.friendly_name,
+            ts=body.ts,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/ha_energy_sources")
+def get_ha_energy_sources():
+    """Inspector endpoint: every tracked energy sensor with its latest reading,
+    today's delta, and linked device id."""
+    try:
+        return list_energy_sources()
+    except Exception:
         return []
 
 

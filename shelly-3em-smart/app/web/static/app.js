@@ -638,6 +638,8 @@
       const anomaly = anomaliesById.get(d.id);
       const share = ((stats.energy_wh || 0) / totalToday) * 100;
       const tags = [];
+      const isMetered = (stats.energy_source === 'metered') || (d.energy_source === 'metered');
+      if (isMetered) tags.push('<span class="tag metered" title="Energy comes directly from an HA sensor, not inferred">⚡ Metered</span>');
       if (d.is_continuous) tags.push('<span class="tag continuous">Continuous</span>');
       if (d.source_entity_id) tags.push(`<span class="tag via">via ${escapeHtml(d.source_entity_id)}</span>`);
       if (anomaly) tags.push(`<span class="tag anomaly" title="${escapeHtml(anomaly)}">⚠ Anomaly</span>`);

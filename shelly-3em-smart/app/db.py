@@ -78,7 +78,23 @@ CREATE TABLE IF NOT EXISTS devices (
     mean_power_w     REAL NOT NULL DEFAULT 0,
     total_energy_wh  REAL NOT NULL DEFAULT 0,
     source_entity_id TEXT,
-    is_continuous    INTEGER NOT NULL DEFAULT 0
+    is_continuous    INTEGER NOT NULL DEFAULT 0,
+    energy_source    TEXT NOT NULL DEFAULT 'inferred'   -- 'inferred' or 'metered'
+);
+
+-- HA-reported cumulative energy readings (e.g. smart plug kWh sensors).
+-- baseline_energy_kwh tracks the cumulative value at the start of today
+-- so we can compute today's delta without storing every reading.
+CREATE TABLE IF NOT EXISTS ha_energy_sources (
+    entity_id            TEXT PRIMARY KEY,
+    friendly_name        TEXT,
+    device_id            INTEGER,
+    baseline_energy_kwh  REAL,
+    baseline_ts          REAL,
+    latest_energy_kwh    REAL,
+    latest_power_w       REAL,
+    latest_ts            REAL,
+    first_seen_ts        REAL
 );
 
 -- Raw HA state-change events posted by the HACS integration. Kept for
@@ -161,6 +177,9 @@ def _migrate(c: sqlite3.Connection) -> None:
 
     if "is_continuous" not in cols:
         c.execute("ALTER TABLE devices ADD COLUMN is_continuous INTEGER NOT NULL DEFAULT 0")
+
+    if "energy_source" not in cols:
+        c.execute("ALTER TABLE devices ADD COLUMN energy_source TEXT NOT NULL DEFAULT 'inferred'")
 
 
 def conn() -> sqlite3.Connection:

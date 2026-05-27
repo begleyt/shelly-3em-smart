@@ -11,6 +11,7 @@ from typing import Optional
 
 from .config import settings
 from .db import cursor
+# Imported lazily inside functions to avoid circulars on first init.
 
 
 def _dict_row(cur, row):
@@ -47,13 +48,32 @@ def device_stats(device_id: int, since_ts: Optional[float] = None) -> dict:
         cur.row_factory = _dict_row
         cur.execute(
             "SELECT id, name, is_on, last_on_ts, last_off_ts, mean_power_w, "
-            "is_continuous "
+            "is_continuous, source_entity_id, energy_source "
             "FROM devices WHERE id = ?",
             (device_id,),
         )
         dev = cur.fetchone()
         if dev is None:
             return {}
+
+    # Metered device: trust HA's cumulative kWh sensor directly. Skip the
+    # cycle-replay model entirely — we have ground truth.
+    if dev.get("energy_source") == "metered" and dev.get("source_entity_id"):
+        from .ha_energy import metered_today_wh
+        wh = metered_today_wh(dev["source_entity_id"])
+        if wh is not None:
+            return {
+                "device_id": device_id,
+                "name": dev["name"],
+                "mean_power_w": float(dev["mean_power_w"] or 0.0),
+                "is_on": bool(dev["is_on"]),
+                "is_continuous": bool(dev.get("is_continuous")),
+                "energy_source": "metered",
+                "cycles_today": 0,             # we don't track per-cycle for metered
+                "runtime_seconds": 0.0,        # could be derived later if needed
+                "energy_wh": wh,
+                "cost": _cost(wh),
+            }
 
         # State transitions in window, oldest first.
         cur.execute(
@@ -117,6 +137,7 @@ def device_stats(device_id: int, since_ts: Optional[float] = None) -> dict:
         "mean_power_w": mean_w,
         "is_on": bool(dev["is_on"]),
         "is_continuous": bool(dev.get("is_continuous")),
+        "energy_source": "inferred",
         "cycles_today": cycles,
         "runtime_seconds": on_seconds,
         "energy_wh": wh,

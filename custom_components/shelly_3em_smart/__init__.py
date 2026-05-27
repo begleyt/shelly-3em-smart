@@ -8,8 +8,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import CONF_HOST, CONF_PORT, CONF_TRACKED_ENTITIES, DOMAIN
+from .const import CONF_ENERGY_ENTITIES, CONF_HOST, CONF_PORT, CONF_TRACKED_ENTITIES, DOMAIN
 from .coordinator import ShellyAddonClient, ShellyAddonCoordinator
+from .ha_energy_poller import setup_energy_poller
 from .ha_listener import setup_ha_event_listener
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,10 +36,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Wire up the HA state-change listener for any entities the user has
     # configured in the options flow.
     tracked = list(entry.options.get(CONF_TRACKED_ENTITIES, []))
-    unsub = setup_ha_event_listener(hass, client, tracked)
-    entry.async_on_unload(unsub)
+    unsub_listener = setup_ha_event_listener(hass, client, tracked)
+    entry.async_on_unload(unsub_listener)
 
-    # Reload when the user changes the tracked-entity list in options.
+    # Wire up the energy poller for cumulative-kWh sensors.
+    energy_entities = list(entry.options.get(CONF_ENERGY_ENTITIES, []))
+    unsub_energy = setup_energy_poller(hass, client, energy_entities)
+    entry.async_on_unload(unsub_energy)
+
+    # Reload when the user changes the options.
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     return True
