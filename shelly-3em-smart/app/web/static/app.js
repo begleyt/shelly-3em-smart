@@ -256,6 +256,7 @@
       document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
       btn.classList.add('active');
       $('tab-' + btn.dataset.tab).classList.add('active');
+      if (btn.dataset.tab === 'insights') loadInsights();
       if (btn.dataset.tab === 'devices') loadDevices();
       if (btn.dataset.tab === 'clusters') loadClusters();
       if (btn.dataset.tab === 'history') loadHistory();
