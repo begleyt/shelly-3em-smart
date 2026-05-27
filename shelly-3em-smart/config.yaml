@@ -1,5 +1,5 @@
 name: Shelly 3EM Smart Monitor
-version: "0.2.1"
+version: "0.2.2"
 slug: shelly_3em_smart
 description: >-
   Streams data from a Shelly Pro 3EM, auto-detects appliances from their

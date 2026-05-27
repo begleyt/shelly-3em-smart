@@ -170,6 +170,8 @@
     const pairRows = pairs.map(p => {
       const on = p.on_cluster, off = p.off_cluster;
       const w = Math.round(p.mean_power_w);
+      const startTimes = formatRecentTimes(on.recent_event_ts);
+      const stopTimes = formatRecentTimes(off.recent_event_ts);
       return `
       <div class="list-item">
         <div class="dir on" title="Auto-paired start + stop clusters. Labelling here links both to one device.">Pair</div>
@@ -183,6 +185,10 @@
             <span>start: ${on.sample_count}</span>
             <span>stop: ${off.sample_count}</span>
           </div>
+          <div class="meta" style="margin-top:4px;font-size:0.72rem;">
+            <span>Recent starts: ${startTimes || '—'}</span>
+            <span>Recent stops: ${stopTimes || '—'}</span>
+          </div>
         </div>
         <button class="primary" data-label="${on.id}">Label</button>
       </div>`;
@@ -192,6 +198,7 @@
       const c = o.cluster;
       const label = c.mean_power > 0 ? 'Start' : 'Stop';
       const dir = c.mean_power > 0 ? 'on' : 'off';
+      const times = formatRecentTimes(c.recent_event_ts);
       return `
       <div class="list-item">
         <div class="dir ${dir}" title="Couldn't find a confident pair. Labelling will still work but the matcher only catches one direction.">${label}</div>
@@ -203,6 +210,9 @@
             <span>${cfg.channelC}: ${Math.round(c.mean_c_power)} W</span>
             <span>pf ${Number(c.mean_pf || 0).toFixed(2)}</span>
             <span>${c.sample_count} events</span>
+          </div>
+          <div class="meta" style="margin-top:4px;font-size:0.72rem;">
+            <span>Recent: ${times || '—'}</span>
           </div>
         </div>
         <button class="primary" data-label="${c.id}">Label</button>
@@ -402,6 +412,24 @@
   $('history-window').addEventListener('change', loadHistory);
 
   // --- utils ---
+  function formatRecentTimes(timestamps) {
+    if (!timestamps || !timestamps.length) return '';
+    const now = Date.now();
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    return timestamps.slice(0, 4).map(ts => {
+      const d = new Date(ts * 1000);
+      const ageMs = now - d.getTime();
+      // Short relative form for very recent events
+      if (ageMs < 60000) return Math.round(ageMs / 1000) + 's ago';
+      if (ageMs < 3600000) return Math.round(ageMs / 60000) + 'm ago';
+      // Absolute time for today, day+time for older
+      if (d.getTime() >= todayStart.getTime()) {
+        return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      }
+      return d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    }).join(', ');
+  }
+
   function escapeHtml(s) {
     if (s === null || s === undefined) return '';
     return String(s).replace(/[&<>"']/g, c => ({

@@ -20,7 +20,7 @@ router = APIRouter()
 @router.get("/api/info")
 def info():
     return {
-        "version": "0.2.1",
+        "version": "0.2.2",
         "shelly_host": settings.shelly_host,
         "channel_a_label": settings.channel_a_label,
         "channel_b_label": settings.channel_b_label,
@@ -270,10 +270,15 @@ def _pair_score(a: dict, b: dict) -> float:
 
 
 @router.get("/api/cluster_pairs")
-def list_cluster_pairs():
+def list_cluster_pairs(recent_n: int = 5):
     """Group unlabelled clusters into probable appliances (a start-cluster
     paired with its matching stop-cluster) plus orphans that didn't find a
-    confident pair."""
+    confident pair.
+
+    `recent_n` is the number of most-recent event timestamps to attach to
+    each cluster — used by the UI to show "last seen at HH:MM" hints that
+    help identify which appliance the cluster belongs to.
+    """
     with cursor() as cur:
         cur.row_factory = _dict_row
         cur.execute(
@@ -284,6 +289,27 @@ def list_cluster_pairs():
                ORDER BY ABS(mean_power) DESC"""
         )
         clusters = cur.fetchall()
+
+        # Pull the most recent event timestamps for each unlabelled cluster.
+        if clusters:
+            ids = [c["id"] for c in clusters]
+            placeholders = ",".join(["?"] * len(ids))
+            cur.execute(
+                f"SELECT cluster_id, ts FROM events "
+                f"WHERE cluster_id IN ({placeholders}) "
+                f"ORDER BY ts DESC",
+                ids,
+            )
+            recent: dict[int, list[float]] = {}
+            for row in cur.fetchall():
+                cid = row["cluster_id"]
+                if cid is None:
+                    continue
+                lst = recent.setdefault(cid, [])
+                if len(lst) < max(recent_n, 1):
+                    lst.append(row["ts"])
+            for c in clusters:
+                c["recent_event_ts"] = recent.get(c["id"], [])
 
     on_clusters = [c for c in clusters if c["mean_power"] > 0]
     off_clusters = [c for c in clusters if c["mean_power"] < 0]
