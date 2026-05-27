@@ -3,6 +3,50 @@
   const $ = (id) => document.getElementById(id);
   const API = 'api';
 
+  // --- Chart.js plugin: vertical HA-event annotation lines ---
+  const haAnnotationPlugin = {
+    id: 'haAnnotations',
+    afterDatasetsDraw(chart, args, opts) {
+      const events = (opts && opts.events) || [];
+      const buffer = (opts && opts.buffer) || [];
+      if (!events.length || !buffer.length) return;
+      const { ctx, chartArea: { top, bottom }, scales: { x } } = chart;
+
+      events.forEach(ev => {
+        // Find the chart label closest in time to this event's ts (±30s).
+        let bestIdx = -1, bestDiff = Infinity;
+        for (let i = 0; i < buffer.length; i++) {
+          const diff = Math.abs((buffer[i].ts || 0) - ev.ts);
+          if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
+        }
+        if (bestIdx < 0 || bestDiff > 60) return;
+        const px = x.getPixelForValue(buffer[bestIdx].label);
+
+        const color = ev.direction === 'on' ? '#7fd06b' : '#f72585';
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(px, top);
+        ctx.lineTo(px, bottom);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Short label: friendly_name if available, else last part of entity_id.
+        const name = ev.friendly_name || (ev.entity_id.split('.')[1] || ev.entity_id);
+        const short = name.length > 18 ? name.slice(0, 17) + '…' : name;
+        const arrow = ev.direction === 'on' ? '▲' : '▼';
+        ctx.fillStyle = color;
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(`${arrow} ${short}`, px + 3, top + 11);
+        ctx.restore();
+      });
+    },
+  };
+  if (window.Chart) Chart.register(haAnnotationPlugin);
+
   // --- Tabs ---
   document.querySelectorAll('.tab').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -17,8 +61,9 @@
   });
 
   // --- Live updates ---
-  const liveBuf = [];
+  const liveBuf = [];   // [{ts, label, a, b, c, total}, ...]
   let liveChart;
+  let liveHaEvents = [];   // most recent HA events shown on the live chart
 
   function fmt(n, digits = 0) {
     if (n === null || n === undefined) return '—';
@@ -45,9 +90,20 @@
           y: { ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' }, title: { display: true, text: 'Watts', color: '#8a93a6' } },
           x: { ticks: { color: '#8a93a6', maxTicksLimit: 8 }, grid: { color: '#2a3340' } }
         },
-        plugins: { legend: { labels: { color: '#e6e9ef' } } }
+        plugins: {
+          legend: { labels: { color: '#e6e9ef' } },
+          haAnnotations: { events: [], buffer: [] }
+        }
       }
     });
+  }
+
+  async function pollHaEvents() {
+    try {
+      const r = await fetch(API + '/ha_event_log?minutes=30');
+      if (!r.ok) return;
+      liveHaEvents = await r.json();
+    } catch {}
   }
 
   async function pollLive() {
@@ -74,14 +130,19 @@
       $('c-pf').textContent = fmt(s.c_pf, 2);
 
       if (s.ts) {
-        const t = new Date(s.ts * 1000).toLocaleTimeString();
-        liveBuf.push({ t, a: s.a_power, b: s.b_power, c: s.c_power, total: s.total_power });
+        const label = new Date(s.ts * 1000).toLocaleTimeString();
+        liveBuf.push({ ts: s.ts, label, a: s.a_power, b: s.b_power, c: s.c_power, total: s.total_power });
         if (liveBuf.length > 180) liveBuf.shift();
-        liveChart.data.labels = liveBuf.map(p => p.t);
+        liveChart.data.labels = liveBuf.map(p => p.label);
         liveChart.data.datasets[0].data = liveBuf.map(p => p.a);
         liveChart.data.datasets[1].data = liveBuf.map(p => p.b);
         liveChart.data.datasets[2].data = liveBuf.map(p => p.c);
         liveChart.data.datasets[3].data = liveBuf.map(p => p.total);
+        // Only show events that fall inside the current rolling window.
+        const oldest = liveBuf[0].ts;
+        const newest = liveBuf[liveBuf.length - 1].ts;
+        liveChart.options.plugins.haAnnotations.events = liveHaEvents.filter(e => e.ts >= oldest && e.ts <= newest);
+        liveChart.options.plugins.haAnnotations.buffer = liveBuf.map(p => ({ ts: p.ts, label: p.label }));
         liveChart.update('none');
       }
     } catch (e) {
@@ -382,9 +443,14 @@
   let historyChart;
   async function loadHistory() {
     const minutes = parseInt($('history-window').value);
-    const r = await fetch(API + '/history?minutes=' + minutes);
-    const data = await r.json();
+    const [historyResp, eventsResp] = await Promise.all([
+      fetch(API + '/history?minutes=' + minutes),
+      fetch(API + '/ha_event_log?minutes=' + minutes + '&limit=500'),
+    ]);
+    const data = await historyResp.json();
+    const events = eventsResp.ok ? await eventsResp.json() : [];
     const labels = data.map(d => new Date(d.ts * 1000).toLocaleTimeString());
+    const buffer = data.map((d, i) => ({ ts: d.ts, label: labels[i] }));
     const cfg2 = {
       type: 'line',
       data: {
@@ -403,7 +469,10 @@
           y: { ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' }, title: { display: true, text: 'Watts', color: '#8a93a6' } },
           x: { ticks: { color: '#8a93a6', maxTicksLimit: 12 }, grid: { color: '#2a3340' } }
         },
-        plugins: { legend: { labels: { color: '#e6e9ef' } } }
+        plugins: {
+          legend: { labels: { color: '#e6e9ef' } },
+          haAnnotations: { events, buffer }
+        }
       }
     };
     if (historyChart) historyChart.destroy();
@@ -441,8 +510,10 @@
   initLiveChart();
   pollLive();
   pollStats();
+  pollHaEvents();
   setInterval(pollLive, 1500);
   setInterval(pollStats, 15000);
+  setInterval(pollHaEvents, 5000);
   setInterval(() => {
     if (document.querySelector('.tab.active').dataset.tab === 'devices') loadDevices();
   }, 5000);

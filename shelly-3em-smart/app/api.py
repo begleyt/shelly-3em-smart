@@ -20,7 +20,7 @@ router = APIRouter()
 @router.get("/api/info")
 def info():
     return {
-        "version": "0.2.2",
+        "version": "0.2.3",
         "shelly_host": settings.shelly_host,
         "channel_a_label": settings.channel_a_label,
         "channel_b_label": settings.channel_b_label,
@@ -51,6 +51,27 @@ def post_ha_event(body: HaEventIn):
         friendly_name=body.friendly_name,
         ts=body.ts,
     )
+
+
+@router.get("/api/ha_event_log")
+def ha_event_log(minutes: int = 60, limit: int = 200):
+    """Recent classified HA state changes — used by the dashboard charts
+    to overlay vertical "X turned on/off" markers on the power lines."""
+    cutoff = time.time() - minutes * 60
+    with cursor() as cur:
+        cur.row_factory = _dict_row
+        cur.execute(
+            """SELECT he.ts, he.entity_id, he.direction, he.new_state, he.old_state,
+                      hen.friendly_name
+               FROM ha_events he
+               LEFT JOIN ha_entities hen ON hen.entity_id = he.entity_id
+               WHERE he.ts >= ?
+                 AND he.direction IS NOT NULL
+               ORDER BY he.ts ASC
+               LIMIT ?""",
+            (cutoff, limit),
+        )
+        return cur.fetchall()
 
 
 @router.get("/api/ha_entities")
