@@ -8,6 +8,7 @@ from .clusterer import run_clustering
 from .config import settings
 from .db import cursor
 from .ha_correlator import record_ha_event
+from .inference import absorb_unlabeled_clusters
 from .mqtt_publisher import publisher
 from .state import state
 
@@ -19,7 +20,7 @@ router = APIRouter()
 @router.get("/api/info")
 def info():
     return {
-        "version": "0.2.0",
+        "version": "0.2.1",
         "shelly_host": settings.shelly_host,
         "channel_a_label": settings.channel_a_label,
         "channel_b_label": settings.channel_b_label,
@@ -405,6 +406,7 @@ class DeviceManualCreate(BaseModel):
     channel_c_power_w: Optional[float] = None
     power_factor: Optional[float] = 1.0
     currently_on: bool = False
+    is_continuous: bool = False
 
 
 def _retroactive_match_events(
@@ -486,9 +488,10 @@ def create_device_manual(body: DeviceManualCreate):
         cur.row_factory = _dict_row
 
         cur.execute(
-            "INSERT INTO devices (name, notes, created_ts, is_on, mean_power_w, total_energy_wh) "
-            "VALUES (?,?,?,0,?,0)",
-            (body.name, body.notes, now, body.power_w),
+            "INSERT INTO devices (name, notes, created_ts, is_on, mean_power_w, "
+            "total_energy_wh, is_continuous) "
+            "VALUES (?,?,?,0,?,0,?)",
+            (body.name, body.notes, now, body.power_w, 1 if body.is_continuous else 0),
         )
         device_id = cur.lastrowid
 
@@ -522,35 +525,78 @@ def create_device_manual(body: DeviceManualCreate):
                 )
 
     publisher.publish_device_discovery(device_id, body.name)
+    # Mop up any pre-existing unlabeled clusters that now match this device.
+    absorb_result = absorb_unlabeled_clusters()
     return {
         "id": device_id,
         "name": body.name,
         "mean_power_w": body.power_w,
         "matched_history_events": matched_count,
+        "absorbed_clusters": absorb_result["absorbed"],
     }
 
 
 class DeviceUpdate(BaseModel):
     name: Optional[str] = None
     notes: Optional[str] = None
+    is_continuous: Optional[bool] = None
+    force_state: Optional[str] = None   # 'on' | 'off' to manually toggle
 
 
 @router.patch("/api/devices/{device_id}")
 def update_device(device_id: int, body: DeviceUpdate):
-    fields = []
-    values = []
+    fields: list[str] = []
+    values: list = []
     if body.name is not None:
         fields.append("name = ?")
         values.append(body.name)
     if body.notes is not None:
         fields.append("notes = ?")
         values.append(body.notes)
+    if body.is_continuous is not None:
+        fields.append("is_continuous = ?")
+        values.append(1 if body.is_continuous else 0)
+
+    now = time.time()
+    if body.force_state == "on":
+        fields.append("is_on = 1")
+        fields.append("last_on_ts = ?")
+        values.append(now)
+    elif body.force_state == "off":
+        # Tally any in-progress energy first
+        with cursor() as cur:
+            cur.execute(
+                "SELECT is_on, last_on_ts, mean_power_w, total_energy_wh "
+                "FROM devices WHERE id = ?",
+                (device_id,),
+            )
+            row = cur.fetchone()
+            if row and row[0] and row[1]:
+                elapsed_s = max(0.0, now - float(row[1]))
+                energy_wh = float(row[2] or 0) * elapsed_s / 3600.0
+                cur.execute(
+                    "UPDATE devices SET total_energy_wh = "
+                    "COALESCE(total_energy_wh, 0) + ? WHERE id = ?",
+                    (energy_wh, device_id),
+                )
+        fields.append("is_on = 0")
+        fields.append("last_off_ts = ?")
+        values.append(now)
+
     if not fields:
         return {"ok": True}
     values.append(device_id)
     with cursor() as cur:
         cur.execute(f"UPDATE devices SET {', '.join(fields)} WHERE id = ?", values)
+    if body.force_state in ("on", "off"):
+        publisher.publish_device_state(device_id, body.force_state)
     return {"ok": True}
+
+
+@router.post("/api/absorb_clusters")
+def trigger_absorb():
+    """Force a sweep of unlabeled clusters into matching existing devices."""
+    return absorb_unlabeled_clusters()
 
 
 @router.delete("/api/devices/{device_id}")

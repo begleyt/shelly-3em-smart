@@ -7,6 +7,10 @@ from .db import cursor
 
 log = logging.getLogger(__name__)
 
+# Reject an off-event that comes too quickly after the on-event — almost
+# certainly an unrelated load being mis-attributed.
+MIN_ON_DURATION_S = 30.0
+
 
 def _dict_row(cursor_, row):
     return {col[0]: row[i] for i, col in enumerate(cursor_.description)}
@@ -16,6 +20,8 @@ def match_event_to_device(event_id: int, event: dict) -> Optional[int]:
     """Find the labelled cluster whose signature best matches this event.
 
     Returns the device_id if a match is found within tolerance, else None.
+    Devices flagged is_continuous are skipped entirely — their state is
+    set by the user, not by step-event matching.
     """
     direction = event["direction"]
     sign = 1 if direction == "on" else -1
@@ -24,9 +30,13 @@ def match_event_to_device(event_id: int, event: dict) -> Optional[int]:
         cur.row_factory = _dict_row
         cur.execute(
             """SELECT c.id AS cluster_id, c.device_id, c.mean_power, c.std_power,
-                      c.mean_a_power, c.mean_b_power, c.mean_c_power
+                      c.mean_a_power, c.mean_b_power, c.mean_c_power,
+                      d.is_continuous, d.is_on, d.last_on_ts
                FROM clusters c
-               WHERE c.device_id IS NOT NULL AND c.mean_power * ? > 0""",
+               JOIN devices d ON d.id = c.device_id
+               WHERE c.device_id IS NOT NULL
+                 AND c.mean_power * ? > 0
+                 AND d.is_continuous = 0""",
             (sign,),
         )
         candidates = cur.fetchall()
@@ -54,6 +64,18 @@ def match_event_to_device(event_id: int, event: dict) -> Optional[int]:
 
     device_id = int(best["device_id"])
     cluster_id = int(best["cluster_id"])
+
+    # Reject too-soon off-events: a real device being on for <30s and then
+    # off is rare; almost always this is a different load whose signature
+    # happens to match.
+    if direction == "off" and best.get("is_on") and best.get("last_on_ts"):
+        on_duration = float(event["ts"]) - float(best["last_on_ts"])
+        if on_duration < MIN_ON_DURATION_S:
+            log.info(
+                "Rejecting off-event match for device %d: only %.1fs since on (min %.0fs)",
+                device_id, on_duration, MIN_ON_DURATION_S,
+            )
+            return None
 
     with cursor() as cur:
         cur.execute(
@@ -103,3 +125,83 @@ def match_event_to_device(event_id: int, event: dict) -> Optional[int]:
 
     log.info("Event %d matched device %d (%s)", event_id, device_id, direction)
     return device_id
+
+
+def absorb_unlabeled_clusters() -> dict:
+    """Sweep every unlabeled cluster and attach it to an existing device whose
+    signature matches within tolerance. Called after HA promotions, manual
+    device creation, and at the end of each periodic clusterer pass — so the
+    Unlabeled Clusters tab stops showing things that are clearly the same as
+    an already-labelled appliance.
+    """
+    with cursor() as cur:
+        cur.row_factory = _dict_row
+        cur.execute(
+            """SELECT d.id AS device_id, d.mean_power_w,
+                      MAX(CASE WHEN c.mean_power > 0 THEN c.mean_a_power ELSE -c.mean_a_power END) AS mean_a_power,
+                      MAX(CASE WHEN c.mean_power > 0 THEN c.mean_b_power ELSE -c.mean_b_power END) AS mean_b_power,
+                      MAX(CASE WHEN c.mean_power > 0 THEN c.mean_c_power ELSE -c.mean_c_power END) AS mean_c_power,
+                      AVG(c.std_power) AS std_power
+               FROM devices d
+               JOIN clusters c ON c.device_id = d.id
+               GROUP BY d.id, d.mean_power_w"""
+        )
+        devices = cur.fetchall()
+        if not devices:
+            return {"absorbed": 0, "linked_events": 0}
+
+        cur.execute(
+            """SELECT id, mean_power, mean_a_power, mean_b_power, mean_c_power
+               FROM clusters WHERE device_id IS NULL"""
+        )
+        candidates = cur.fetchall()
+        if not candidates:
+            return {"absorbed": 0, "linked_events": 0}
+
+        absorbed_ids: list[tuple[int, int]] = []  # (cluster_id, device_id)
+        for cand in candidates:
+            best_dev = None
+            best_score = math.inf
+            for dev in devices:
+                target_mp = float(dev["mean_power_w"] or 0.0)
+                if target_mp <= 0:
+                    continue
+                # Match purely on magnitude (sign just determines direction).
+                score = (
+                    (abs(cand["mean_power"]) - target_mp) ** 2
+                    + (abs(cand["mean_a_power"]) - abs(dev["mean_a_power"] or 0.0)) ** 2 * 0.5
+                    + (abs(cand["mean_b_power"]) - abs(dev["mean_b_power"] or 0.0)) ** 2 * 0.5
+                    + (abs(cand["mean_c_power"]) - abs(dev["mean_c_power"] or 0.0)) ** 2 * 0.5
+                )
+                tol = max(target_mp * 0.25, 50.0) ** 2 * 2.0
+                if score < best_score and score < tol:
+                    best_score = score
+                    best_dev = dev
+            if best_dev:
+                absorbed_ids.append((int(cand["id"]), int(best_dev["device_id"])))
+
+        for cluster_id, device_id in absorbed_ids:
+            cur.execute(
+                "UPDATE clusters SET device_id = ? WHERE id = ?",
+                (device_id, cluster_id),
+            )
+            cur.execute(
+                "UPDATE events SET device_id = ? WHERE cluster_id = ? AND device_id IS NULL",
+                (device_id, cluster_id),
+            )
+
+        # Count linked events for reporting.
+        linked = 0
+        if absorbed_ids:
+            cluster_ids = [str(c) for c, _ in absorbed_ids]
+            cur.execute(
+                f"SELECT COUNT(*) AS n FROM events WHERE cluster_id IN ({','.join(cluster_ids)})"
+            )
+            linked = int(cur.fetchone()["n"])
+
+        if absorbed_ids:
+            log.info(
+                "Absorbed %d unlabeled clusters into existing devices (%d events linked)",
+                len(absorbed_ids), linked,
+            )
+        return {"absorbed": len(absorbed_ids), "linked_events": linked}

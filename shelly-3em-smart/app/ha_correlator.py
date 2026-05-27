@@ -201,5 +201,18 @@ def correlate_step_event(event_id: int, event: dict) -> Optional[str]:
                 "Promoted HA entity %s to device %d (%s) at %.0fW after %d matches",
                 entity_id, device_id, name, mean_w, n,
             )
+            # Mop up any pre-existing unlabeled clusters whose signature
+            # matches the new device. Done outside the cursor() block since
+            # the helper acquires its own cursor.
+            _newly_promoted = True
+        else:
+            _newly_promoted = False
+
+    if _newly_promoted:
+        try:
+            from .inference import absorb_unlabeled_clusters
+            absorb_unlabeled_clusters()
+        except Exception:
+            log.exception("Post-promotion cluster absorb failed")
 
     return entity_id

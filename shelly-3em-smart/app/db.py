@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS devices (
     last_off_ts      REAL,
     mean_power_w     REAL NOT NULL DEFAULT 0,
     total_energy_wh  REAL NOT NULL DEFAULT 0,
-    source_entity_id TEXT
+    source_entity_id TEXT,
+    is_continuous    INTEGER NOT NULL DEFAULT 0
 );
 
 -- Raw HA state-change events posted by the HACS integration. Kept for
@@ -157,6 +158,9 @@ def _migrate(c: sqlite3.Connection) -> None:
 
     if "source_entity_id" not in cols:
         c.execute("ALTER TABLE devices ADD COLUMN source_entity_id TEXT")
+
+    if "is_continuous" not in cols:
+        c.execute("ALTER TABLE devices ADD COLUMN is_continuous INTEGER NOT NULL DEFAULT 0")
 
 
 def conn() -> sqlite3.Connection:

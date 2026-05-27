@@ -83,6 +83,7 @@
     </p>
     <div class="actions">
       <button id="recluster-btn">Re-run clustering now</button>
+      <button id="absorb-btn">Absorb into existing devices</button>
       <span id="recluster-status" class="muted"></span>
     </div>
     <div id="clusters-list" class="list"></div>
@@ -119,6 +120,29 @@
   </div>
 </div>
 
+<!-- Edit device modal -->
+<div id="modal-edit" class="modal hidden">
+  <div class="modal-body">
+    <h3>Edit device</h3>
+    <div id="edit-device-info" class="muted"></div>
+    <label>Name <input id="edit-name" /></label>
+    <label>Notes <textarea id="edit-notes" rows="2"></textarea></label>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer;">
+      <input id="edit-continuous" type="checkbox" style="width:auto;margin:0;" />
+      <span style="color:var(--fg);">Continuous load (don't toggle via event matching)</span>
+    </label>
+    <p class="muted" style="font-size:0.75rem;margin-top:4px;">For continuous devices the state is controlled by you via the buttons below, not by step events.</p>
+    <div class="actions" style="margin-top:12px;">
+      <button id="edit-force-on">Mark On</button>
+      <button id="edit-force-off">Mark Off</button>
+    </div>
+    <div class="modal-actions">
+      <button id="edit-cancel">Cancel</button>
+      <button id="edit-save" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- Manual add modal -->
 <div id="modal-manual" class="modal hidden">
   <div class="modal-body">
@@ -138,6 +162,11 @@
       <span style="color:var(--fg);">This device is running right now</span>
     </label>
     <p class="muted" style="font-size:0.75rem;margin-top:4px;">Check this if you can see the load on the live chart. We'll also scan the last 24h for past on/off events that match this signature, so energy backfills automatically.</p>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer;">
+      <input id="manual-continuous" type="checkbox" style="width:auto;margin:0;" />
+      <span style="color:var(--fg);">Continuous load (doesn't cycle on/off)</span>
+    </label>
+    <p class="muted" style="font-size:0.75rem;margin-top:4px;">Use for servers, network gear, security cameras &mdash; anything that runs all the time. The matcher will leave it alone; energy accumulates purely by elapsed time.</p>
     <div class="modal-actions">
       <button id="manual-cancel">Cancel</button>
       <button id="manual-save" class="primary">Save</button>

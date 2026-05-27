@@ -114,24 +114,38 @@
       root.innerHTML = `<div class="empty">No devices yet. Label a cluster to start tracking one.</div>`;
       return;
     }
-    root.innerHTML = devices.map(d => `
+    root.innerHTML = devices.map(d => {
+      const tags = [];
+      if (d.is_continuous) tags.push('<span class="muted" style="font-size:0.7rem;padding:2px 6px;border:1px solid var(--border);border-radius:4px;">CONTINUOUS</span>');
+      if (d.source_entity_id) tags.push(`<span class="muted" style="font-size:0.7rem;">via ${escapeHtml(d.source_entity_id)}</span>`);
+      return `
       <div class="list-item">
         <div class="device-state ${d.is_on ? 'on' : ''}">${d.is_on ? 'ON' : 'OFF'}</div>
         <div>
-          <div class="name">${escapeHtml(d.name)}</div>
+          <div class="name">${escapeHtml(d.name)} ${tags.join(' ')}</div>
           <div class="meta">
+            ${Math.round(d.mean_power_w || 0)} W ·
             ${d.notes ? escapeHtml(d.notes) + ' · ' : ''}
             ${d.last_on_ts ? 'last on ' + new Date(d.last_on_ts * 1000).toLocaleString() : 'never seen on'}
           </div>
         </div>
-        <button class="danger" data-del="${d.id}">Delete</button>
-      </div>
-    `).join('');
+        <div>
+          <button data-edit='${JSON.stringify(d).replace(/'/g, "&#39;")}'>Edit</button>
+          <button class="danger" data-del="${d.id}">Delete</button>
+        </div>
+      </div>`;
+    }).join('');
     root.querySelectorAll('[data-del]').forEach(b => {
       b.addEventListener('click', async () => {
         if (!confirm('Delete this device? The cluster will become unlabeled again.')) return;
         await fetch(API + '/devices/' + b.dataset.del, { method: 'DELETE' });
         loadDevices();
+      });
+    });
+    root.querySelectorAll('[data-edit]').forEach(b => {
+      b.addEventListener('click', () => {
+        const d = JSON.parse(b.dataset.edit.replace(/&#39;/g, "'"));
+        openEditModal(d);
       });
     });
   }
@@ -208,8 +222,18 @@
     $('recluster-status').textContent = 'running…';
     const r = await fetch(API + '/recluster', { method: 'POST' });
     const j = await r.json();
-    $('recluster-status').textContent = `found ${j.on} on-clusters, ${j.off} off-clusters`;
+    $('recluster-status').textContent = `found ${j.on} on-clusters, ${j.off} off-clusters · absorbed ${j.absorbed || 0} into existing devices`;
     loadClusters();
+    loadDevices();
+  });
+
+  $('absorb-btn').addEventListener('click', async () => {
+    $('recluster-status').textContent = 'absorbing…';
+    const r = await fetch(API + '/absorb_clusters', { method: 'POST' });
+    const j = await r.json();
+    $('recluster-status').textContent = `absorbed ${j.absorbed} clusters (${j.linked_events} events) into existing devices`;
+    loadClusters();
+    loadDevices();
   });
 
   // --- Label modal ---
@@ -248,9 +272,62 @@
     ['manual-name', 'manual-power', 'manual-power-a', 'manual-power-b', 'manual-power-c', 'manual-notes']
       .forEach(id => { $(id).value = ''; });
     $('manual-currently-on').checked = false;
+    $('manual-continuous').checked = false;
     $('modal-manual').classList.remove('hidden');
     $('manual-name').focus();
   }
+
+  // --- Edit device modal ---
+  let editingDeviceId = null;
+  function openEditModal(d) {
+    editingDeviceId = d.id;
+    $('edit-device-info').textContent = `${d.name} · ~${Math.round(d.mean_power_w || 0)} W · currently ${d.is_on ? 'ON' : 'OFF'}`;
+    $('edit-name').value = d.name || '';
+    $('edit-notes').value = d.notes || '';
+    $('edit-continuous').checked = !!d.is_continuous;
+    $('modal-edit').classList.remove('hidden');
+    $('edit-name').focus();
+  }
+  $('edit-cancel').addEventListener('click', () => $('modal-edit').classList.add('hidden'));
+  $('edit-save').addEventListener('click', async () => {
+    if (editingDeviceId == null) return;
+    const body = {
+      name: $('edit-name').value.trim() || null,
+      notes: $('edit-notes').value.trim() || null,
+      is_continuous: $('edit-continuous').checked,
+    };
+    const r = await fetch(API + '/devices/' + editingDeviceId, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) {
+      $('modal-edit').classList.add('hidden');
+      loadDevices();
+    } else {
+      alert('Failed to save');
+    }
+  });
+  $('edit-force-on').addEventListener('click', async () => {
+    if (editingDeviceId == null) return;
+    await fetch(API + '/devices/' + editingDeviceId, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force_state: 'on' }),
+    });
+    $('modal-edit').classList.add('hidden');
+    loadDevices();
+  });
+  $('edit-force-off').addEventListener('click', async () => {
+    if (editingDeviceId == null) return;
+    await fetch(API + '/devices/' + editingDeviceId, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force_state: 'off' }),
+    });
+    $('modal-edit').classList.add('hidden');
+    loadDevices();
+  });
   $('manual-add-btn').addEventListener('click', openManualModal);
   $('manual-cancel').addEventListener('click', () => $('modal-manual').classList.add('hidden'));
   $('manual-save').addEventListener('click', async () => {
@@ -270,6 +347,7 @@
       channel_b_power_w: num('manual-power-b'),
       channel_c_power_w: num('manual-power-c'),
       currently_on: $('manual-currently-on').checked,
+      is_continuous: $('manual-continuous').checked,
     };
     const r = await fetch(API + '/devices/manual', {
       method: 'POST',
