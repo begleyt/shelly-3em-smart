@@ -315,19 +315,39 @@
     } catch {}
   }
 
+  // Shared latest sample so other tabs (Insights hero) can show live-updating values.
+  const state = { latestSample: null };
+
   async function pollLive() {
     try {
       const r = await fetch(API + '/live');
       if (!r.ok) throw new Error('bad status');
       const s = await r.json();
+      state.latestSample = s;
       $('conn-indicator').textContent = 'live';
       $('conn-indicator').className = 'ok';
 
-      $('total-power').textContent = fmt(s.total_power);
+      // Live tab values
+      $('total-power').textContent = Math.round(s.total_power || 0).toLocaleString();
       $('total-current').textContent = fmt(s.total_current, 2);
-      $('a-power').textContent = fmt(s.a_power);
-      $('b-power').textContent = fmt(s.b_power);
-      $('c-power').textContent = fmt(s.c_power);
+
+      // Insights hero — keeps the right-now reading in sync without a full reload
+      const heroPower = $('hero-power');
+      if (heroPower) heroPower.textContent = Math.round(s.total_power || 0).toLocaleString();
+      const heroCurrent = $('hero-current');
+      if (heroCurrent) heroCurrent.textContent = (s.total_current || 0).toFixed(1);
+      const heroCostRate = $('hero-cost-rate');
+      if (heroCostRate && lastInsights) {
+        const rate = appInfo.rate_cents_per_kwh || lastInsights.rate_cents_per_kwh || 0;
+        if (rate > 0) {
+          const cph = ((s.total_power || 0) / 1000) * (rate / 100);
+          const sym = appInfo.currency_symbol || lastInsights.currency_symbol || '$';
+          heroCostRate.textContent = `${sym}${cph.toFixed(2)}`;
+        }
+      }
+      $('a-power').textContent = Math.round(s.a_power || 0).toLocaleString();
+      $('b-power').textContent = Math.round(s.b_power || 0).toLocaleString();
+      $('c-power').textContent = Math.round(s.c_power || 0).toLocaleString();
       $('a-current').textContent = fmt(s.a_current, 2);
       $('b-current').textContent = fmt(s.b_current, 2);
       $('c-current').textContent = fmt(s.c_current, 2);
@@ -392,44 +412,56 @@
     }
   }
 
+  let energyDonutChart = null;
+  let lastInsights = null;
+
   function renderInsights(ins) {
+    lastInsights = ins;
     const panel = ins.panel_today || {};
     const phantom = ins.phantom_load || {};
     const attributed = ins.attributed_wh || 0;
-    const unattributed = ins.unattributed_wh || 0;
-    const hasRate = (appInfo.rate_cents_per_kwh || ins.rate_cents_per_kwh) > 0;
+    const rate = appInfo.rate_cents_per_kwh || ins.rate_cents_per_kwh || 0;
+    const hasRate = rate > 0;
+    const sym = appInfo.currency_symbol || ins.currency_symbol || '$';
 
-    const cards = [
-      {
-        label: 'Today',
-        value: fmtKwh(panel.wh),
-        sub: hasRate ? fmtMoney(panel.cost) : 'Set $/kWh in add-on options',
-      },
-      {
-        label: 'Always-on baseline',
-        value: `${Math.round(phantom.watts)} W`,
-        sub: hasRate ? `~${fmtMoney(phantom.daily_cost)}/day` : `~${fmtKwh(phantom.daily_wh)}/day`,
-      },
-      {
-        label: 'Attributed to devices',
-        value: `${Math.round((attributed / (panel.wh || 1)) * 100)}%`,
-        sub: `${fmtKwh(attributed)} of ${fmtKwh(panel.wh)}`,
-      },
-      {
-        label: 'Active anomalies',
-        value: (ins.anomalies || []).length.toString(),
-        sub: (ins.anomalies || []).length ? 'See below' : 'Everything nominal',
-      },
-    ];
+    // -- Hero: live values driven by pollLive too, but seed from insights data
+    const livePower = (state.latestSample && state.latestSample.total_power) || 0;
+    $('hero-power').textContent = Math.round(livePower).toLocaleString();
+    $('hero-current').textContent = ((state.latestSample && state.latestSample.total_current) || 0).toFixed(1);
+    const devicesOn = (ins.all_devices_today || []).filter(d => d.is_on).length;
+    $('hero-devices-on').textContent = devicesOn;
+    if (hasRate) {
+      // Right-now cost rate per hour at current power draw
+      const costPerHour = (livePower / 1000) * (rate / 100);
+      $('hero-cost-rate').textContent = `${sym}${costPerHour.toFixed(2)}`;
+      $('hero-cost-sub').textContent = '/hour at current draw';
+    } else {
+      $('hero-cost-rate').textContent = '—';
+      $('hero-cost-sub').textContent = 'Set rate in add-on options';
+    }
 
-    $('insights-headline').innerHTML = cards.map(c => `
-      <div class="card">
-        <div class="card-label">${c.label}</div>
-        <div class="insight-headline-value">${c.value}</div>
-        <div class="card-sub">${c.sub}</div>
-      </div>
-    `).join('');
+    // -- 4 stat cards
+    $('stat-today-energy').innerHTML = fmtKwh(panel.wh);
+    $('stat-today-cost').textContent = hasRate ? fmtMoney(panel.cost) : 'set rate to see cost';
 
+    $('stat-phantom').innerHTML = `${Math.round(phantom.watts || 0)}<span class="insight-headline-unit">W</span>`;
+    $('stat-phantom-cost').textContent = hasRate ? `${fmtMoney(phantom.daily_cost)}/day` : `${fmtKwh(phantom.daily_wh)}/day`;
+
+    const attrPct = panel.wh ? Math.round((attributed / panel.wh) * 100) : 0;
+    $('stat-attribution').innerHTML = `${attrPct}<span class="insight-headline-unit">%</span>`;
+    $('stat-attribution-detail').textContent = `${fmtKwh(attributed)} of ${fmtKwh(panel.wh)}`;
+
+    const anomalyCount = (ins.anomalies || []).length;
+    $('stat-anomaly-count').textContent = anomalyCount;
+    $('stat-anomaly-status').textContent = anomalyCount ? 'see below' : 'all normal';
+
+    // -- Donut: today's energy by device
+    renderEnergyDonut(ins);
+
+    // -- Activity feed: merge HA + device events, sort newest first
+    renderActivityFeed(ins);
+
+    // -- Top consumers
     const top = ins.top_devices_today || [];
     const topMax = Math.max(1, ...top.map(d => d.energy_wh || 0));
     if (!top.length) {
@@ -441,20 +473,21 @@
           <div class="device-stat-row">
             <div class="device-state ${d.is_on ? 'on' : ''}">${d.is_on ? 'ON' : 'OFF'}</div>
             <div>
-              <div class="name" style="font-weight:600;">${escapeHtml(d.name)}</div>
-              <div class="stat-bar"><div class="stat-bar-fill" style="width:${pct}%;"></div></div>
+              <div style="font-weight:600;color:var(--fg-1);">${escapeHtml(d.name)}</div>
+              <div class="stat-bar"><div class="stat-bar-fill" style="width:${pct}%;background:${colorFor(d.name)};"></div></div>
             </div>
             <div class="stat-pill">${d.cycles_today || 0} cycles</div>
             <div class="stat-pill">${fmtDurationLong(d.runtime_seconds || 0)}</div>
-            <div style="text-align:right;">
-              <div style="font-weight:600;">${fmtKwh(d.energy_wh || 0)}</div>
+            <div style="text-align:right;min-width:90px;">
+              <div style="font-weight:600;font-variant-numeric:tabular-nums;color:var(--fg-1);">${fmtKwh(d.energy_wh || 0)}</div>
               ${hasRate ? `<div class="card-sub">${fmtMoney(d.cost || 0)}</div>` : ''}
             </div>
           </div>`;
       }).join('');
     }
 
-    if ((ins.anomalies || []).length) {
+    // -- Anomalies
+    if (anomalyCount) {
       $('insights-anomalies-card').style.display = '';
       $('insights-anomalies').innerHTML = ins.anomalies.map(a => `
         <div class="anomaly-row">
@@ -467,36 +500,181 @@
     }
   }
 
+  function renderEnergyDonut(ins) {
+    const devices = (ins.all_devices_today || []).filter(d => (d.energy_wh || 0) > 0);
+    const panelWh = (ins.panel_today && ins.panel_today.wh) || 0;
+    const attributedWh = ins.attributed_wh || 0;
+    const unattributedWh = Math.max(0, panelWh - attributedWh);
+
+    devices.sort((a, b) => (b.energy_wh || 0) - (a.energy_wh || 0));
+    const slices = devices.map(d => ({
+      label: d.name,
+      wh: d.energy_wh || 0,
+      color: colorFor(d.name),
+    }));
+    if (unattributedWh > 0.001) {
+      slices.push({ label: 'Unattributed', wh: unattributedWh, color: '#3a4250' });
+    }
+
+    const total = slices.reduce((s, x) => s + x.wh, 0);
+    const canvas = $('energy-donut');
+    if (!canvas) return;
+    if (!total || !slices.length) {
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#3a4250';
+      ctx.font = '13px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('No energy yet today', canvas.width / 2, canvas.height / 2);
+      $('donut-legend').innerHTML = '';
+      return;
+    }
+
+    if (energyDonutChart) energyDonutChart.destroy();
+    energyDonutChart = new Chart(canvas, {
+      type: 'doughnut',
+      data: {
+        labels: slices.map(s => s.label),
+        datasets: [{
+          data: slices.map(s => s.wh),
+          backgroundColor: slices.map(s => s.color),
+          borderColor: '#0a0e13',
+          borderWidth: 2,
+        }],
+      },
+      options: {
+        plugins: { legend: { display: false }, tooltip: {
+          callbacks: { label: ctx => `${ctx.label}: ${fmtKwh(ctx.parsed)} (${((ctx.parsed/total)*100).toFixed(1)}%)` }
+        }},
+        cutout: '64%',
+        animation: { duration: 400 },
+      },
+    });
+
+    $('donut-legend').innerHTML = slices.map(s => {
+      const pct = ((s.wh / total) * 100).toFixed(1);
+      return `
+        <div class="donut-legend-row">
+          <span class="donut-legend-swatch" style="background:${s.color};"></span>
+          <span>${escapeHtml(s.label)}</span>
+          <span class="pct">${fmtKwh(s.wh)} · ${pct}%</span>
+        </div>`;
+    }).join('');
+  }
+
+  async function renderActivityFeed(ins) {
+    // Pull recent HA + device events. Both endpoints already exist.
+    try {
+      const [haR, dvR] = await Promise.all([
+        fetch(API + '/ha_event_log?minutes=720&limit=80'),
+        fetch(API + '/device_state_log?minutes=720&limit=80'),
+      ]);
+      const ha = haR.ok ? await haR.json() : [];
+      const dv = dvR.ok ? await dvR.json() : [];
+      const items = [];
+      for (const e of ha) {
+        items.push({ ts: e.ts, name: e.friendly_name || e.entity_id, direction: e.direction, source: 'HA' });
+      }
+      for (const e of dv) {
+        items.push({ ts: e.ts, name: e.device_name, direction: e.state, source: 'Detected' });
+      }
+      items.sort((a, b) => b.ts - a.ts);
+      const root = $('activity-feed');
+      if (!items.length) {
+        root.innerHTML = '<div class="empty" style="padding:18px;">No recent events.</div>';
+        return;
+      }
+      root.innerHTML = items.slice(0, 30).map(it => {
+        const cls = it.direction === 'on' ? 'on' : 'off';
+        const arrow = it.direction === 'on' ? '▲ ON' : '▼ OFF';
+        return `
+          <div class="activity-row ${cls}">
+            <span class="arrow">${arrow}</span>
+            <span class="name">${escapeHtml(it.name)} <span class="src">${it.source}</span></span>
+            <span class="time">${fmtTimeShort(it.ts)}</span>
+          </div>`;
+      }).join('');
+    } catch {}
+  }
+
+  function fmtTimeShort(ts) {
+    const d = new Date(ts * 1000);
+    const now = Date.now();
+    const ageMs = now - d.getTime();
+    if (ageMs < 60000)   return Math.round(ageMs / 1000) + 's ago';
+    if (ageMs < 3600000) return Math.round(ageMs / 60000) + 'm ago';
+    const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+    if (d.getTime() >= todayStart.getTime()) {
+      return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    }
+    return d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+
   // --- Devices ---
   async function loadDevices() {
-    const r = await fetch(API + '/devices');
-    const devices = await r.json();
+    // Pull devices and today's stats together so we can render rich rows
+    // without N round-trips. Insights endpoint already computes all_devices_today.
+    const [devR, insR] = await Promise.all([
+      fetch(API + '/devices'),
+      fetch(API + '/insights'),
+    ]);
+    const devices = await devR.json();
+    const insights = insR.ok ? await insR.json() : { all_devices_today: [], rate_cents_per_kwh: 0 };
+    const statsById = new Map();
+    for (const s of (insights.all_devices_today || [])) statsById.set(s.device_id, s);
+    const anomaliesById = new Map();
+    for (const a of (insights.anomalies || [])) anomaliesById.set(a.device_id, a.anomaly);
+    const hasRate = (insights.rate_cents_per_kwh || appInfo.rate_cents_per_kwh || 0) > 0;
+    const totalToday = (insights.attributed_wh || 0) || 1;
+
     const root = $('devices-list');
     if (!devices.length) {
       root.innerHTML = `<div class="empty">No devices yet. Label a cluster to start tracking one.</div>`;
       return;
     }
+
     root.innerHTML = devices.map(d => {
+      const stats = statsById.get(d.id) || {};
+      const anomaly = anomaliesById.get(d.id);
+      const share = ((stats.energy_wh || 0) / totalToday) * 100;
       const tags = [];
-      if (d.is_continuous) tags.push('<span class="muted" style="font-size:0.7rem;padding:2px 6px;border:1px solid var(--border);border-radius:4px;">CONTINUOUS</span>');
-      if (d.source_entity_id) tags.push(`<span class="muted" style="font-size:0.7rem;">via ${escapeHtml(d.source_entity_id)}</span>`);
+      if (d.is_continuous) tags.push('<span class="tag continuous">Continuous</span>');
+      if (d.source_entity_id) tags.push(`<span class="tag via">via ${escapeHtml(d.source_entity_id)}</span>`);
+      if (anomaly) tags.push(`<span class="tag anomaly" title="${escapeHtml(anomaly)}">⚠ Anomaly</span>`);
+
+      const energyHtml = (stats.energy_wh || 0) > 0
+        ? `<div style="font-weight:600;font-variant-numeric:tabular-nums;">${fmtKwh(stats.energy_wh)}</div>
+           ${hasRate ? `<div class="card-sub">${fmtMoney(stats.cost || 0)}</div>` : ''}`
+        : '<div class="card-sub">no energy yet</div>';
+
       return `
-      <div class="list-item">
+      <div class="list-item" style="grid-template-columns:auto 1fr auto auto auto auto;">
         <div class="device-state ${d.is_on ? 'on' : ''}">${d.is_on ? 'ON' : 'OFF'}</div>
         <div>
           <div class="name">${escapeHtml(d.name)} ${tags.join(' ')}</div>
           <div class="meta">
-            ${Math.round(d.mean_power_w || 0)} W ·
-            ${d.notes ? escapeHtml(d.notes) + ' · ' : ''}
-            ${d.last_on_ts ? 'last on ' + new Date(d.last_on_ts * 1000).toLocaleString() : 'never seen on'}
+            <span>${Math.round(d.mean_power_w || 0)} W</span>
+            ${d.notes ? `<span>· ${escapeHtml(d.notes)}</span>` : ''}
+            <span>· ${d.last_on_ts ? 'last on ' + new Date(d.last_on_ts * 1000).toLocaleString() : 'never seen on'}</span>
           </div>
+          <div class="stat-bar"><div class="stat-bar-fill" style="width:${Math.min(100, Math.max(0, share))}%;"></div></div>
         </div>
-        <div>
+        <div style="text-align:center;min-width:60px;">
+          <div style="font-weight:600;font-variant-numeric:tabular-nums;">${stats.cycles_today || 0}</div>
+          <div class="card-sub">cycles</div>
+        </div>
+        <div style="text-align:center;min-width:80px;">
+          <div style="font-weight:600;font-variant-numeric:tabular-nums;">${fmtDurationLong(stats.runtime_seconds || 0)}</div>
+          <div class="card-sub">runtime</div>
+        </div>
+        <div style="text-align:right;min-width:90px;">${energyHtml}</div>
+        <div style="display:flex;gap:4px;">
           <button data-edit='${JSON.stringify(d).replace(/'/g, "&#39;")}'>Edit</button>
           <button class="danger" data-del="${d.id}">Delete</button>
         </div>
       </div>`;
     }).join('');
+
     root.querySelectorAll('[data-del]').forEach(b => {
       b.addEventListener('click', async () => {
         if (!confirm('Delete this device? The cluster will become unlabeled again.')) return;
