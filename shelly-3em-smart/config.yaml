@@ -1,5 +1,5 @@
 name: Shelly 3EM Smart Monitor
-version: "0.2.7"
+version: "0.3.0"
 slug: shelly_3em_smart
 description: >-
   Streams data from a Shelly Pro 3EM, auto-detects appliances from their
@@ -46,6 +46,8 @@ options:
   mqtt_username: ""
   mqtt_password: ""
   mqtt_discovery_prefix: homeassistant
+  electricity_rate_cents_per_kwh: 0.0
+  currency_symbol: "$"
   log_level: info
 schema:
   shelly_host: str
@@ -66,5 +68,7 @@ schema:
   mqtt_username: str?
   mqtt_password: password?
   mqtt_discovery_prefix: str
+  electricity_rate_cents_per_kwh: float(0,200)
+  currency_symbol: str
   log_level: list(trace|debug|info|notice|warning|error|fatal)
 image: ghcr.io/begleyt/shelly-3em-smart-{arch}

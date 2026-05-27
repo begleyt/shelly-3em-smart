@@ -15,6 +15,8 @@ export CLUSTER_MIN_SAMPLES="$(bashio::config 'cluster_min_samples')"
 export CLUSTER_EPS_W="$(bashio::config 'cluster_eps_w')"
 export SAMPLE_RETENTION_DAYS="$(bashio::config 'sample_retention_days')"
 export SAMPLE_DOWNSAMPLE_S="$(bashio::config 'sample_downsample_s')"
+export ELECTRICITY_RATE_CENTS_PER_KWH="$(bashio::config 'electricity_rate_cents_per_kwh')"
+export CURRENCY_SYMBOL="$(bashio::config 'currency_symbol')"
 
 export DB_PATH="/data/shelly.db"
 export HTTP_PORT="8080"

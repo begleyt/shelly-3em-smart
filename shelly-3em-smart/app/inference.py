@@ -11,6 +11,67 @@ log = logging.getLogger(__name__)
 # certainly an unrelated load being mis-attributed.
 MIN_ON_DURATION_S = 30.0
 
+# When two devices match an event with similar scores, prefer the one whose
+# historical timing matches the current hour-of-day. This boost (smaller is
+# stronger) divides the raw score before comparison.
+TIME_OF_DAY_BOOST = 0.6   # up to 40% score reduction
+TIME_OF_DAY_MIN_SAMPLES = 5
+
+# Cache: device_id -> {hour: fraction-of-historical-events-at-this-hour}
+_time_pattern_cache: dict[int, dict[int, float]] = {}
+_time_pattern_cache_ts: float = 0.0
+_TIME_PATTERN_CACHE_TTL_S = 600.0
+
+
+def _refresh_time_patterns() -> None:
+    """Compute hour-of-day distributions for each device from device_state_log.
+
+    Refreshed lazily every TIME_PATTERN_CACHE_TTL_S so the matcher gets faster
+    awareness of new patterns as devices accumulate history, without doing the
+    SQL on every event.
+    """
+    global _time_pattern_cache, _time_pattern_cache_ts
+    now = time.time()
+    if now - _time_pattern_cache_ts < _TIME_PATTERN_CACHE_TTL_S and _time_pattern_cache:
+        return
+    cutoff = now - 30 * 86400  # last 30 days
+    counts: dict[int, dict[int, int]] = {}
+    totals: dict[int, int] = {}
+    with cursor() as cur:
+        cur.execute(
+            "SELECT device_id, ts FROM device_state_log "
+            "WHERE state = 'on' AND ts >= ?",
+            (cutoff,),
+        )
+        for device_id, ts in cur.fetchall():
+            hour = int(time.localtime(ts).tm_hour)
+            d = counts.setdefault(device_id, {})
+            d[hour] = d.get(hour, 0) + 1
+            totals[device_id] = totals.get(device_id, 0) + 1
+    new_cache: dict[int, dict[int, float]] = {}
+    for device_id, hourly in counts.items():
+        total = totals.get(device_id, 0)
+        if total < TIME_OF_DAY_MIN_SAMPLES:
+            continue
+        new_cache[device_id] = {h: c / total for h, c in hourly.items()}
+    _time_pattern_cache = new_cache
+    _time_pattern_cache_ts = now
+
+
+def _time_of_day_score(device_id: int, ts: float) -> float:
+    """Return a multiplier <= 1.0 to apply to the match score (smaller wins).
+    Returns 1.0 if we have no pattern for this device yet."""
+    _refresh_time_patterns()
+    pat = _time_pattern_cache.get(device_id)
+    if not pat:
+        return 1.0
+    hour = int(time.localtime(ts).tm_hour)
+    # Use this hour plus the two adjacent for some smoothing.
+    weight = pat.get(hour, 0.0) + 0.5 * pat.get((hour - 1) % 24, 0.0) + 0.5 * pat.get((hour + 1) % 24, 0.0)
+    weight = min(1.0, weight)
+    # weight 0 → multiplier 1.0; weight 1.0 → multiplier TIME_OF_DAY_BOOST.
+    return 1.0 - (1.0 - TIME_OF_DAY_BOOST) * weight
+
 
 def _dict_row(cursor_, row):
     return {col[0]: row[i] for i, col in enumerate(cursor_.description)}
@@ -47,13 +108,17 @@ def match_event_to_device(event_id: int, event: dict) -> Optional[int]:
     best = None
     best_score = math.inf
     for c in candidates:
-        score = (
+        raw = (
             (abs(event["delta_power"]) - abs(c["mean_power"])) ** 2 * 1.0
             + (abs(event["delta_a_power"]) - abs(c["mean_a_power"])) ** 2 * 0.5
             + (abs(event["delta_b_power"]) - abs(c["mean_b_power"])) ** 2 * 0.5
             + (abs(event["delta_c_power"]) - abs(c["mean_c_power"])) ** 2 * 0.5
         )
-        # Tolerance scales with the cluster's own spread, with a floor.
+        # Time-of-day awareness: a device whose historical cycles match the
+        # current hour gets a lower (better) score, breaking ties between
+        # devices with similar wattage.
+        score = raw * _time_of_day_score(int(c["device_id"]), float(event["ts"]))
+        # Tolerance still scales with the cluster's own spread, with a floor.
         tol = max(c["std_power"], 25.0) ** 2 * 4.0
         if score < best_score and score < tol:
             best_score = score

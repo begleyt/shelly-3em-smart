@@ -348,6 +348,93 @@
     } catch {}
   }
 
+  // --- Insights ---
+  async function loadInsights() {
+    try {
+      const r = await fetch(API + '/insights');
+      if (!r.ok) return;
+      const ins = await r.json();
+      renderInsights(ins);
+    } catch (e) {
+      console.warn('insights fetch failed', e);
+    }
+  }
+
+  function renderInsights(ins) {
+    const panel = ins.panel_today || {};
+    const phantom = ins.phantom_load || {};
+    const attributed = ins.attributed_wh || 0;
+    const unattributed = ins.unattributed_wh || 0;
+    const hasRate = (appInfo.rate_cents_per_kwh || ins.rate_cents_per_kwh) > 0;
+
+    const cards = [
+      {
+        label: 'Today',
+        value: fmtKwh(panel.wh),
+        sub: hasRate ? fmtMoney(panel.cost) : 'Set $/kWh in add-on options',
+      },
+      {
+        label: 'Always-on baseline',
+        value: `${Math.round(phantom.watts)} W`,
+        sub: hasRate ? `~${fmtMoney(phantom.daily_cost)}/day` : `~${fmtKwh(phantom.daily_wh)}/day`,
+      },
+      {
+        label: 'Attributed to devices',
+        value: `${Math.round((attributed / (panel.wh || 1)) * 100)}%`,
+        sub: `${fmtKwh(attributed)} of ${fmtKwh(panel.wh)}`,
+      },
+      {
+        label: 'Active anomalies',
+        value: (ins.anomalies || []).length.toString(),
+        sub: (ins.anomalies || []).length ? 'See below' : 'Everything nominal',
+      },
+    ];
+
+    $('insights-headline').innerHTML = cards.map(c => `
+      <div class="card">
+        <div class="card-label">${c.label}</div>
+        <div class="insight-headline-value">${c.value}</div>
+        <div class="card-sub">${c.sub}</div>
+      </div>
+    `).join('');
+
+    const top = ins.top_devices_today || [];
+    const topMax = Math.max(1, ...top.map(d => d.energy_wh || 0));
+    if (!top.length) {
+      $('insights-top').innerHTML = '<div class="empty">No labelled devices have used energy today yet.</div>';
+    } else {
+      $('insights-top').innerHTML = top.map(d => {
+        const pct = Math.max(2, Math.round(((d.energy_wh || 0) / topMax) * 100));
+        return `
+          <div class="device-stat-row">
+            <div class="device-state ${d.is_on ? 'on' : ''}">${d.is_on ? 'ON' : 'OFF'}</div>
+            <div>
+              <div class="name" style="font-weight:600;">${escapeHtml(d.name)}</div>
+              <div class="stat-bar"><div class="stat-bar-fill" style="width:${pct}%;"></div></div>
+            </div>
+            <div class="stat-pill">${d.cycles_today || 0} cycles</div>
+            <div class="stat-pill">${fmtDurationLong(d.runtime_seconds || 0)}</div>
+            <div style="text-align:right;">
+              <div style="font-weight:600;">${fmtKwh(d.energy_wh || 0)}</div>
+              ${hasRate ? `<div class="card-sub">${fmtMoney(d.cost || 0)}</div>` : ''}
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    if ((ins.anomalies || []).length) {
+      $('insights-anomalies-card').style.display = '';
+      $('insights-anomalies').innerHTML = ins.anomalies.map(a => `
+        <div class="anomaly-row">
+          <span><b>${escapeHtml(a.name)}</b></span>
+          <span class="muted">${escapeHtml(a.anomaly || '')}</span>
+        </div>
+      `).join('');
+    } else {
+      $('insights-anomalies-card').style.display = 'none';
+    }
+  }
+
   // --- Devices ---
   async function loadDevices() {
     const r = await fetch(API + '/devices');
@@ -706,12 +793,16 @@
 
   // --- boot ---
   initLiveChart();
+  pollInfo();
   pollLive();
   pollStats();
   pollOverlays();
+  loadInsights();
   setInterval(pollLive, 1500);
   setInterval(pollStats, 15000);
   setInterval(pollOverlays, 2000);
+  setInterval(loadInsights, 15000);
+  setInterval(pollInfo, 60000);
   setInterval(() => {
     if (document.querySelector('.tab.active').dataset.tab === 'devices') loadDevices();
   }, 5000);

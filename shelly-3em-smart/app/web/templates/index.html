@@ -18,15 +18,34 @@
 </header>
 
 <nav class="tabs">
-  <button class="tab active" data-tab="live">Live</button>
+  <button class="tab active" data-tab="insights">Insights</button>
+  <button class="tab" data-tab="live">Live</button>
   <button class="tab" data-tab="devices">Devices</button>
   <button class="tab" data-tab="clusters">Unlabeled Clusters</button>
   <button class="tab" data-tab="history">History</button>
 </nav>
 
 <main>
+  <!-- INSIGHTS -->
+  <section id="tab-insights" class="tab-panel active">
+    <div class="cards" id="insights-headline" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));"></div>
+    <div class="card chart-card" style="margin-top:16px;">
+      <div class="card-label">Top consumers today</div>
+      <div id="insights-top" class="list" style="margin-top:8px;"></div>
+    </div>
+    <div class="card chart-card" id="insights-anomalies-card" style="margin-top:16px;display:none;">
+      <div class="card-label" style="color:var(--warn);">⚠ Anomalies</div>
+      <div id="insights-anomalies" class="list" style="margin-top:8px;"></div>
+    </div>
+    <p class="muted" style="font-size:0.75rem;margin-top:16px;">
+      Energy figures are estimates from inferred on-times × snapshot mean wattage per device.
+      Panel total is integrated from second-level samples and is the authoritative figure for
+      whole-house consumption.
+    </p>
+  </section>
+
   <!-- LIVE -->
-  <section id="tab-live" class="tab-panel active">
+  <section id="tab-live" class="tab-panel">
     <div class="cards">
       <div class="card big">
         <div class="card-label">Total Power</div>

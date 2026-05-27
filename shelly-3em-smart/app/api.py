@@ -9,6 +9,7 @@ from .config import settings
 from .db import cursor
 from .ha_correlator import record_ha_event
 from .inference import absorb_unlabeled_clusters
+from .insights import all_device_stats, anomaly_check, device_stats, insights, panel_energy_today, phantom_load
 from .mqtt_publisher import publisher
 from .state import state
 
@@ -20,14 +21,48 @@ router = APIRouter()
 @router.get("/api/info")
 def info():
     return {
-        "version": "0.2.7",
+        "version": "0.3.0",
         "shelly_host": settings.shelly_host,
         "channel_a_label": settings.channel_a_label,
         "channel_b_label": settings.channel_b_label,
         "channel_c_label": settings.channel_c_label,
         "mqtt_enabled": settings.mqtt_enabled,
         "supports_ha_events": True,
+        "supports_insights": True,
+        "rate_cents_per_kwh": settings.electricity_rate_cents_per_kwh,
+        "currency_symbol": settings.currency_symbol,
     }
+
+
+# ---------- insights (v0.3.0) ----------
+
+@router.get("/api/insights")
+def get_insights():
+    """One-shot summary for the Insights tab: today's energy + cost,
+    phantom load, top consumers, anomalies."""
+    try:
+        return insights()
+    except Exception:
+        return {
+            "now": time.time(),
+            "panel_today": {"wh": 0.0, "cost": 0.0},
+            "phantom_load": {"watts": 0.0, "daily_wh": 0.0, "daily_cost": 0.0, "sample_count": 0},
+            "top_devices_today": [],
+            "all_devices_today": [],
+            "anomalies": [],
+            "rate_cents_per_kwh": settings.electricity_rate_cents_per_kwh,
+            "currency_symbol": settings.currency_symbol,
+        }
+
+
+@router.get("/api/devices/{device_id}/stats")
+def get_device_stats(device_id: int):
+    s = device_stats(device_id)
+    if s:
+        msg = anomaly_check(s)
+        if msg:
+            s["anomaly"] = msg
+    return s
 
 
 # ---------- HA state-change correlation ----------
