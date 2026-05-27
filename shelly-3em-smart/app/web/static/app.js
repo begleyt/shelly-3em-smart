@@ -315,15 +315,15 @@
         liveChart.data.datasets[1].data = liveBuf.map(p => p.b);
         liveChart.data.datasets[2].data = liveBuf.map(p => p.c);
         liveChart.data.datasets[3].data = liveBuf.map(p => p.total);
-        // Only show events that fall inside the current rolling window.
-        const oldest = liveBuf[0].ts;
-        const newest = liveBuf[liveBuf.length - 1].ts;
+        // Pass all events through; the plugin's tsToPixel does its own
+        // ±60s proximity check against the buffer, so out-of-window events
+        // are silently skipped. We avoid hard upper-bound filtering here
+        // because a fresh off-event can have ts slightly newer than the
+        // most recent buffered sample and would otherwise blink in late.
         const bufView = liveBuf.map(p => ({ ts: p.ts, label: p.label }));
-        liveChart.options.plugins.haAnnotations.events = liveHaEvents.filter(e => e.ts >= oldest && e.ts <= newest);
+        liveChart.options.plugins.haAnnotations.events = liveHaEvents;
         liveChart.options.plugins.haAnnotations.buffer = bufView;
-        // For device shading we want events up to oldest (so an on-period that
-        // started before the visible window still shades correctly).
-        liveChart.options.plugins.deviceAnnotations.stateLog = liveDeviceStateLog.filter(e => e.ts <= newest);
+        liveChart.options.plugins.deviceAnnotations.stateLog = liveDeviceStateLog;
         liveChart.options.plugins.deviceAnnotations.buffer = bufView;
         liveChart.update('none');
       }
@@ -711,7 +711,7 @@
   pollOverlays();
   setInterval(pollLive, 1500);
   setInterval(pollStats, 15000);
-  setInterval(pollOverlays, 5000);
+  setInterval(pollOverlays, 2000);
   setInterval(() => {
     if (document.querySelector('.tab.active').dataset.tab === 'devices') loadDevices();
   }, 5000);
