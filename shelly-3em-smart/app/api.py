@@ -21,7 +21,7 @@ router = APIRouter()
 @router.get("/api/info")
 def info():
     return {
-        "version": "0.3.0",
+        "version": "0.3.1",
         "shelly_host": settings.shelly_host,
         "channel_a_label": settings.channel_a_label,
         "channel_b_label": settings.channel_b_label,

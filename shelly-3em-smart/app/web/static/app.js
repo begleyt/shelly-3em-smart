@@ -6,6 +6,37 @@
   // Toggle state for chart overlays — wired up in boot() to checkboxes.
   const overlayToggles = { ha: true, device: true, shade: true };
 
+  // Cached /api/info response; refreshed periodically. Used by the Insights
+  // renderer for currency symbol + rate, and by anything else that needs
+  // to know what version of the add-on is talking.
+  let appInfo = {};
+  async function pollInfo() {
+    try {
+      const r = await fetch(API + '/info');
+      if (r.ok) appInfo = await r.json();
+    } catch {}
+  }
+
+  // --- Formatters used by Insights ---
+  function fmtKwh(wh) {
+    if (wh === null || wh === undefined || isNaN(wh)) return '—';
+    const kwh = Number(wh) / 1000;
+    if (kwh < 0.01) return `${Math.round(Number(wh))} Wh`;
+    return `${kwh.toFixed(2)} kWh`;
+  }
+  function fmtMoney(amount) {
+    if (amount === null || amount === undefined || isNaN(amount)) return '—';
+    const sym = appInfo.currency_symbol || '$';
+    return `${sym}${Number(amount).toFixed(2)}`;
+  }
+  function fmtDurationLong(seconds) {
+    if (!seconds || seconds < 60) return `${Math.round(seconds || 0)}s`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)} min`;
+    const h = Math.floor(seconds / 3600);
+    const m = Math.round((seconds % 3600) / 60);
+    return m ? `${h}h ${m}m` : `${h}h`;
+  }
+
   // Stable per-device colors via name hash → HSL hue.
   const deviceColorCache = new Map();
   function colorFor(name) {
