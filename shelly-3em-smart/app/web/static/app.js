@@ -3,25 +3,48 @@
   const $ = (id) => document.getElementById(id);
   const API = 'api';
 
+  // Toggle state for chart overlays — wired up in boot() to checkboxes.
+  const overlayToggles = { ha: true, device: true, shade: true };
+
+  // Stable per-device colors via name hash → HSL hue.
+  const deviceColorCache = new Map();
+  function colorFor(name) {
+    if (!deviceColorCache.has(name)) {
+      let h = 0;
+      for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+      deviceColorCache.set(name, `hsl(${Math.abs(h) % 360}, 70%, 62%)`);
+    }
+    return deviceColorCache.get(name);
+  }
+
+  // Each plugin pushes hit-test entries here per draw so the canvas mousemove
+  // handler can find what the cursor is near.
+  const hitTests = new WeakMap();    // chart -> [{ x, ev, type, color }]
+
+  function tsToPixel(buffer, ts, xScale) {
+    let bestIdx = -1, bestDiff = Infinity;
+    for (let i = 0; i < buffer.length; i++) {
+      const diff = Math.abs((buffer[i].ts || 0) - ts);
+      if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
+    }
+    if (bestIdx < 0 || bestDiff > 60) return null;
+    return xScale.getPixelForValue(buffer[bestIdx].label);
+  }
+
   // --- Chart.js plugin: vertical HA-event annotation lines ---
   const haAnnotationPlugin = {
     id: 'haAnnotations',
     afterDatasetsDraw(chart, args, opts) {
+      if (!overlayToggles.ha) return;
       const events = (opts && opts.events) || [];
       const buffer = (opts && opts.buffer) || [];
       if (!events.length || !buffer.length) return;
       const { ctx, chartArea: { top, bottom }, scales: { x } } = chart;
+      const hits = hitTests.get(chart) || [];
 
       events.forEach(ev => {
-        // Find the chart label closest in time to this event's ts (±30s).
-        let bestIdx = -1, bestDiff = Infinity;
-        for (let i = 0; i < buffer.length; i++) {
-          const diff = Math.abs((buffer[i].ts || 0) - ev.ts);
-          if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
-        }
-        if (bestIdx < 0 || bestDiff > 60) return;
-        const px = x.getPixelForValue(buffer[bestIdx].label);
-
+        const px = tsToPixel(buffer, ev.ts, x);
+        if (px === null) return;
         const color = ev.direction === 'on' ? '#7fd06b' : '#f72585';
         ctx.save();
         ctx.strokeStyle = color;
@@ -32,20 +55,168 @@
         ctx.lineTo(px, bottom);
         ctx.stroke();
         ctx.setLineDash([]);
-
-        // Short label: friendly_name if available, else last part of entity_id.
         const name = ev.friendly_name || (ev.entity_id.split('.')[1] || ev.entity_id);
         const short = name.length > 18 ? name.slice(0, 17) + '…' : name;
-        const arrow = ev.direction === 'on' ? '▲' : '▼';
         ctx.fillStyle = color;
         ctx.font = '10px sans-serif';
-        ctx.textAlign = 'left';
-        ctx.fillText(`${arrow} ${short}`, px + 3, top + 11);
+        ctx.fillText(`${ev.direction === 'on' ? '▲' : '▼'} ${short}`, px + 3, top + 11);
         ctx.restore();
+        hits.push({ x: px, top, bottom, color, type: 'ha', ev });
       });
+      hitTests.set(chart, hits);
     },
   };
-  if (window.Chart) Chart.register(haAnnotationPlugin);
+
+  // --- Chart.js plugin: device on-periods (shaded) + transition markers ---
+  const deviceAnnotationPlugin = {
+    id: 'deviceAnnotations',
+    afterDatasetsDraw(chart, args, opts) {
+      const log = (opts && opts.stateLog) || [];
+      const buffer = (opts && opts.buffer) || [];
+      if (!log.length || !buffer.length) return;
+      const { ctx, chartArea: { top, bottom, left, right }, scales: { x } } = chart;
+      const hits = hitTests.get(chart) || [];
+
+      // Group transitions per device id
+      const byDevice = new Map();
+      for (const ev of log) {
+        if (!byDevice.has(ev.device_id)) byDevice.set(ev.device_id, []);
+        byDevice.get(ev.device_id).push(ev);
+      }
+
+      // Track per-device "row" for stacking transition labels so multiple
+      // labels at similar times don't overlap.
+      let row = 0;
+      for (const [devId, events] of byDevice) {
+        const color = colorFor(events[0].device_name);
+
+        // Shaded on-periods: pair consecutive on→off; if still on at end, fill
+        // to the right edge of the chart area.
+        if (overlayToggles.shade) {
+          let onPx = null;
+          for (const ev of events) {
+            const px = tsToPixel(buffer, ev.ts, x);
+            if (px === null) continue;
+            if (ev.state === 'on') {
+              onPx = px;
+            } else if (onPx !== null) {
+              ctx.save();
+              ctx.fillStyle = color;
+              ctx.globalAlpha = 0.10;
+              ctx.fillRect(onPx, top, Math.max(1, px - onPx), bottom - top);
+              ctx.restore();
+              onPx = null;
+            }
+          }
+          if (onPx !== null) {
+            ctx.save();
+            ctx.fillStyle = color;
+            ctx.globalAlpha = 0.10;
+            ctx.fillRect(onPx, top, Math.max(1, right - onPx), bottom - top);
+            ctx.restore();
+          }
+        }
+
+        // Transition markers + label rows (only if device-event toggle is on)
+        if (overlayToggles.device) {
+          const labelY = bottom - 8 - (row % 3) * 12;
+          for (const ev of events) {
+            const px = tsToPixel(buffer, ev.ts, x);
+            if (px === null) continue;
+            ctx.save();
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.3;
+            ctx.beginPath();
+            ctx.moveTo(px, top);
+            ctx.lineTo(px, bottom);
+            ctx.stroke();
+            ctx.restore();
+            hits.push({ x: px, top, bottom, color, type: 'device', ev });
+          }
+          // One label per device near the bottom, anchored to first transition in view
+          const firstPx = tsToPixel(buffer, events[0].ts, x);
+          if (firstPx !== null) {
+            ctx.save();
+            ctx.fillStyle = color;
+            ctx.font = '10px sans-serif';
+            ctx.fillText(events[0].device_name, firstPx + 3, labelY);
+            ctx.restore();
+          }
+        }
+        row++;
+      }
+      hitTests.set(chart, hits);
+    },
+  };
+
+  // Plugin that resets hit-test array at the start of each draw.
+  const hitResetPlugin = {
+    id: 'hitReset',
+    beforeDatasetsDraw(chart) { hitTests.set(chart, []); },
+  };
+
+  if (window.Chart) {
+    Chart.register(hitResetPlugin, deviceAnnotationPlugin, haAnnotationPlugin);
+  }
+
+  // --- Hover tooltip wiring ---
+  function fmtTime(ts) {
+    return new Date(ts * 1000).toLocaleString([], {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+  }
+  function fmtDuration(seconds) {
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+    return `${(seconds / 3600).toFixed(1)}h`;
+  }
+
+  function attachChartHover(chart, tooltipEl) {
+    const canvas = chart.canvas;
+    canvas.addEventListener('mousemove', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const hits = hitTests.get(chart) || [];
+      let nearest = null;
+      let minDist = 8;   // px tolerance
+      for (const h of hits) {
+        if (my < h.top || my > h.bottom) continue;
+        const dist = Math.abs(h.x - mx);
+        if (dist <= minDist) { minDist = dist; nearest = h; }
+      }
+      if (!nearest) {
+        tooltipEl.classList.add('hidden');
+        return;
+      }
+      const ev = nearest.ev;
+      let html = '';
+      if (nearest.type === 'ha') {
+        const name = ev.friendly_name || ev.entity_id;
+        html = `
+          <div class="tt-title" style="color:${nearest.color}">
+            ${ev.direction === 'on' ? '▲' : '▼'} ${escapeHtml(name)}
+          </div>
+          <div class="tt-sub">HA entity</div>
+          <div>${escapeHtml(ev.old_state || '?')} → ${escapeHtml(ev.new_state || '?')}</div>
+          <div class="tt-sub">${fmtTime(ev.ts)}</div>`;
+      } else {
+        html = `
+          <div class="tt-title" style="color:${nearest.color}">
+            ${ev.state === 'on' ? '▲' : '▼'} ${escapeHtml(ev.device_name)}
+          </div>
+          <div class="tt-sub">Detected device · ${ev.state === 'on' ? 'turned on' : 'turned off'}</div>
+          <div class="tt-sub">${fmtTime(ev.ts)}</div>`;
+      }
+      tooltipEl.innerHTML = html;
+      tooltipEl.classList.remove('hidden');
+      const offsetX = nearest.x + 12;
+      const offsetY = Math.max(8, my - 24);
+      tooltipEl.style.left = offsetX + 'px';
+      tooltipEl.style.top = offsetY + 'px';
+    });
+    canvas.addEventListener('mouseleave', () => tooltipEl.classList.add('hidden'));
+  }
 
   // --- Tabs ---
   document.querySelectorAll('.tab').forEach(btn => {
@@ -63,7 +234,8 @@
   // --- Live updates ---
   const liveBuf = [];   // [{ts, label, a, b, c, total}, ...]
   let liveChart;
-  let liveHaEvents = [];   // most recent HA events shown on the live chart
+  let liveHaEvents = [];          // recent HA state changes
+  let liveDeviceStateLog = [];    // recent device transitions
 
   function fmt(n, digits = 0) {
     if (n === null || n === undefined) return '—';
@@ -92,17 +264,22 @@
         },
         plugins: {
           legend: { labels: { color: '#e6e9ef' } },
-          haAnnotations: { events: [], buffer: [] }
+          haAnnotations: { events: [], buffer: [] },
+          deviceAnnotations: { stateLog: [], buffer: [] },
         }
       }
     });
+    attachChartHover(liveChart, $('live-tooltip'));
   }
 
-  async function pollHaEvents() {
+  async function pollOverlays() {
     try {
-      const r = await fetch(API + '/ha_event_log?minutes=30');
-      if (!r.ok) return;
-      liveHaEvents = await r.json();
+      const [haR, devR] = await Promise.all([
+        fetch(API + '/ha_event_log?minutes=30'),
+        fetch(API + '/device_state_log?minutes=30'),
+      ]);
+      if (haR.ok) liveHaEvents = await haR.json();
+      if (devR.ok) liveDeviceStateLog = await devR.json();
     } catch {}
   }
 
@@ -141,8 +318,13 @@
         // Only show events that fall inside the current rolling window.
         const oldest = liveBuf[0].ts;
         const newest = liveBuf[liveBuf.length - 1].ts;
+        const bufView = liveBuf.map(p => ({ ts: p.ts, label: p.label }));
         liveChart.options.plugins.haAnnotations.events = liveHaEvents.filter(e => e.ts >= oldest && e.ts <= newest);
-        liveChart.options.plugins.haAnnotations.buffer = liveBuf.map(p => ({ ts: p.ts, label: p.label }));
+        liveChart.options.plugins.haAnnotations.buffer = bufView;
+        // For device shading we want events up to oldest (so an on-period that
+        // started before the visible window still shades correctly).
+        liveChart.options.plugins.deviceAnnotations.stateLog = liveDeviceStateLog.filter(e => e.ts <= newest);
+        liveChart.options.plugins.deviceAnnotations.buffer = bufView;
         liveChart.update('none');
       }
     } catch (e) {
@@ -443,12 +625,14 @@
   let historyChart;
   async function loadHistory() {
     const minutes = parseInt($('history-window').value);
-    const [historyResp, eventsResp] = await Promise.all([
+    const [historyResp, eventsResp, devResp] = await Promise.all([
       fetch(API + '/history?minutes=' + minutes),
       fetch(API + '/ha_event_log?minutes=' + minutes + '&limit=500'),
+      fetch(API + '/device_state_log?minutes=' + minutes + '&limit=2000'),
     ]);
     const data = await historyResp.json();
     const events = eventsResp.ok ? await eventsResp.json() : [];
+    const stateLog = devResp.ok ? await devResp.json() : [];
     const labels = data.map(d => new Date(d.ts * 1000).toLocaleTimeString());
     const buffer = data.map((d, i) => ({ ts: d.ts, label: labels[i] }));
     const cfg2 = {
@@ -471,12 +655,14 @@
         },
         plugins: {
           legend: { labels: { color: '#e6e9ef' } },
-          haAnnotations: { events, buffer }
+          haAnnotations: { events, buffer },
+          deviceAnnotations: { stateLog, buffer },
         }
       }
     };
     if (historyChart) historyChart.destroy();
     historyChart = new Chart($('history-chart'), cfg2);
+    attachChartHover(historyChart, $('history-tooltip'));
   }
   $('history-window').addEventListener('change', loadHistory);
 
@@ -506,14 +692,26 @@
     })[c]);
   }
 
+  // --- Overlay toggle wiring ---
+  function refreshChart(chart) { if (chart) chart.update('none'); }
+  $('toggle-ha-overlay').addEventListener('change', e => {
+    overlayToggles.ha = e.target.checked; refreshChart(liveChart); refreshChart(historyChart);
+  });
+  $('toggle-device-overlay').addEventListener('change', e => {
+    overlayToggles.device = e.target.checked; refreshChart(liveChart); refreshChart(historyChart);
+  });
+  $('toggle-device-shade').addEventListener('change', e => {
+    overlayToggles.shade = e.target.checked; refreshChart(liveChart); refreshChart(historyChart);
+  });
+
   // --- boot ---
   initLiveChart();
   pollLive();
   pollStats();
-  pollHaEvents();
+  pollOverlays();
   setInterval(pollLive, 1500);
   setInterval(pollStats, 15000);
-  setInterval(pollHaEvents, 5000);
+  setInterval(pollOverlays, 5000);
   setInterval(() => {
     if (document.querySelector('.tab.active').dataset.tab === 'devices') loadDevices();
   }, 5000);

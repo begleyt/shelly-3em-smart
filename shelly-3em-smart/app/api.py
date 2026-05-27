@@ -20,7 +20,7 @@ router = APIRouter()
 @router.get("/api/info")
 def info():
     return {
-        "version": "0.2.4",
+        "version": "0.2.5",
         "shelly_host": settings.shelly_host,
         "channel_a_label": settings.channel_a_label,
         "channel_b_label": settings.channel_b_label,
@@ -51,6 +51,28 @@ def post_ha_event(body: HaEventIn):
         friendly_name=body.friendly_name,
         ts=body.ts,
     )
+
+
+@router.get("/api/device_state_log")
+def device_state_log(minutes: int = 60, limit: int = 500):
+    """Recent on/off transitions for labelled devices — used to overlay
+    shaded on-periods and transition markers on the dashboard charts."""
+    cutoff = time.time() - minutes * 60
+    try:
+        with cursor() as cur:
+            cur.row_factory = _dict_row
+            cur.execute(
+                """SELECT dsl.device_id, d.name AS device_name, dsl.ts, dsl.state
+                   FROM device_state_log dsl
+                   JOIN devices d ON d.id = dsl.device_id
+                   WHERE dsl.ts >= ?
+                   ORDER BY dsl.ts ASC
+                   LIMIT ?""",
+                (cutoff, limit),
+            )
+            return cur.fetchall()
+    except Exception:
+        return []
 
 
 @router.get("/api/ha_event_log")

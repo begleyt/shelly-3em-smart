@@ -51,8 +51,18 @@
     </div>
 
     <div class="card chart-card">
-      <div class="card-label">Last 30 minutes</div>
-      <canvas id="live-chart" height="220"></canvas>
+      <div class="card-label" style="display:flex;justify-content:space-between;align-items:center;">
+        <span>Last 30 minutes</span>
+        <span style="display:flex;gap:14px;font-weight:normal;text-transform:none;letter-spacing:0;font-size:0.75rem;color:var(--fg-dim);">
+          <label style="display:flex;gap:4px;align-items:center;cursor:pointer;"><input type="checkbox" id="toggle-ha-overlay" checked style="width:auto;margin:0;"/>HA events</label>
+          <label style="display:flex;gap:4px;align-items:center;cursor:pointer;"><input type="checkbox" id="toggle-device-overlay" checked style="width:auto;margin:0;"/>Device events</label>
+          <label style="display:flex;gap:4px;align-items:center;cursor:pointer;"><input type="checkbox" id="toggle-device-shade" checked style="width:auto;margin:0;"/>On-period shading</label>
+        </span>
+      </div>
+      <div style="position:relative;">
+        <canvas id="live-chart" height="220"></canvas>
+        <div id="live-tooltip" class="chart-tooltip hidden"></div>
+      </div>
     </div>
 
     <div class="card stats-card">
@@ -102,7 +112,10 @@
         </select>
       </label>
     </div>
-    <canvas id="history-chart" height="280"></canvas>
+    <div style="position:relative;">
+      <canvas id="history-chart" height="280"></canvas>
+      <div id="history-tooltip" class="chart-tooltip hidden"></div>
+    </div>
   </section>
 </main>
 
