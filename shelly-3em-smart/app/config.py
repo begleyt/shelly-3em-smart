@@ -64,6 +64,10 @@ class Settings:
     # Web
     http_port: int = field(default_factory=lambda: _env_int("HTTP_PORT", 8080))
 
+    # Cost (electricity rate × consumption shows in $ throughout the UI)
+    electricity_rate_cents_per_kwh: float = field(default_factory=lambda: _env_float("ELECTRICITY_RATE_CENTS_PER_KWH", 0.0))
+    currency_symbol: str = field(default_factory=lambda: _env("CURRENCY_SYMBOL", "$"))
+
     @property
     def mqtt_enabled(self) -> bool:
         return self.mqtt_host is not None
