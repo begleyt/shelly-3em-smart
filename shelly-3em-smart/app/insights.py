@@ -74,8 +74,11 @@ def device_stats(device_id: int, since_ts: Optional[float] = None) -> dict:
                 "energy_wh": wh,
                 "cost": _cost(wh),
             }
+        # Metered but no reading yet — fall through to the inferred path.
 
-        # State transitions in window, oldest first.
+    # Inferred (or metered-with-no-reading-yet): replay state transitions.
+    with cursor() as cur:
+        cur.row_factory = _dict_row
         cur.execute(
             "SELECT ts, state FROM device_state_log "
             "WHERE device_id = ? AND ts >= ? ORDER BY ts",
