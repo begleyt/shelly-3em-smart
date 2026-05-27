@@ -1,8 +1,12 @@
+import logging
+import sqlite3
 import time
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
+log = logging.getLogger(__name__)
 
 from .clusterer import run_clustering
 from .config import settings
@@ -22,7 +26,7 @@ router = APIRouter()
 @router.get("/api/info")
 def info():
     return {
-        "version": "0.5.1",
+        "version": "0.5.2",
         "shelly_host": settings.shelly_host,
         "channel_a_label": settings.channel_a_label,
         "channel_b_label": settings.channel_b_label,
@@ -44,7 +48,10 @@ def get_insights():
     phantom load, top consumers, anomalies."""
     try:
         return insights()
-    except Exception:
+    except sqlite3.OperationalError as e:
+        # DB locked / migration in progress — return stubs so the UI doesn't 500.
+        # Other errors propagate so they show up in logs instead of silently zeroing.
+        log.warning("get_insights: db unavailable: %s", e)
         return {
             "now": time.time(),
             "panel_today": {"wh": 0.0, "cost": 0.0},
