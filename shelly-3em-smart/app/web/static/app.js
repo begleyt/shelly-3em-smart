@@ -38,25 +38,22 @@
   }
 
   // Stable per-device colors. Hash name → index into a curated categorical
-  // palette so adjacent slices on the donut have maximally distinct hues
-  // (the prior HSL-from-hash scheme produced too-similar greens/blues).
+  // palette. Designed to spread hues evenly around the wheel with at most
+  // one entry per color family (one green, one teal, one blue, etc.) so
+  // even a handful of devices can't all land on the same family.
   const DEVICE_PALETTE = [
-    '#4e79a7', // blue
-    '#f28e2b', // orange
-    '#59a14f', // green
     '#e15759', // red
-    '#b07aa1', // purple
-    '#76b7b2', // teal
+    '#f28e2b', // orange
     '#edc949', // yellow
-    '#ff9da7', // pink
-    '#9c755f', // brown
-    '#bab0ab', // gray
-    '#86bcb6', // light teal
+    '#59a14f', // green
+    '#4e79a7', // blue
+    '#b07aa1', // purple
     '#d37295', // rose
-    '#fabfd2', // light pink
-    '#a0cbe8', // light blue
+    '#9c755f', // brown
+    '#ff9da7', // peach
+    '#76b7b2', // teal
+    '#7e57c2', // violet
     '#ffbe7d', // light orange
-    '#8cd17d', // light green
   ];
   const deviceColorCache = new Map();
   function colorFor(name) {

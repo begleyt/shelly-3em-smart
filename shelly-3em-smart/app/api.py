@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
 
+from . import APP_VERSION
 from .clusterer import run_clustering
 from .config import settings
 from .db import cursor
@@ -26,7 +27,7 @@ router = APIRouter()
 @router.get("/api/info")
 def info():
     return {
-        "version": "0.5.3",
+        "version": APP_VERSION,
         "shelly_host": settings.shelly_host,
         "channel_a_label": settings.channel_a_label,
         "channel_b_label": settings.channel_b_label,
