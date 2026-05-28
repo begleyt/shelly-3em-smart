@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
+from . import APP_VERSION
 from .api import router as api_router
 from .clusterer import cluster_loop
 from .config import settings
@@ -109,9 +110,9 @@ app = FastAPI(title="Shelly 3EM Smart Monitor", lifespan=lifespan)
 app.include_router(api_router)
 
 
-# Single source of truth for the add-on version — also exposed via /api/info
-# and stamped into the dashboard's static asset URLs as a cache-buster.
-APP_VERSION = "0.5.1"
+# APP_VERSION is loaded from config.yaml at import time (see app/__init__.py)
+# so /api/info and the dashboard's cache-bust query string can never drift
+# from what HA Supervisor sees.
 
 
 # Wrap StaticFiles with no-cache headers so even if the browser still asks
