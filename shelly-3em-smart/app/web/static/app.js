@@ -37,13 +37,33 @@
     return m ? `${h}h ${m}m` : `${h}h`;
   }
 
-  // Stable per-device colors via name hash → HSL hue.
+  // Stable per-device colors. Hash name → index into a curated categorical
+  // palette so adjacent slices on the donut have maximally distinct hues
+  // (the prior HSL-from-hash scheme produced too-similar greens/blues).
+  const DEVICE_PALETTE = [
+    '#4e79a7', // blue
+    '#f28e2b', // orange
+    '#59a14f', // green
+    '#e15759', // red
+    '#b07aa1', // purple
+    '#76b7b2', // teal
+    '#edc949', // yellow
+    '#ff9da7', // pink
+    '#9c755f', // brown
+    '#bab0ab', // gray
+    '#86bcb6', // light teal
+    '#d37295', // rose
+    '#fabfd2', // light pink
+    '#a0cbe8', // light blue
+    '#ffbe7d', // light orange
+    '#8cd17d', // light green
+  ];
   const deviceColorCache = new Map();
   function colorFor(name) {
     if (!deviceColorCache.has(name)) {
       let h = 0;
       for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
-      deviceColorCache.set(name, `hsl(${Math.abs(h) % 360}, 70%, 62%)`);
+      deviceColorCache.set(name, DEVICE_PALETTE[Math.abs(h) % DEVICE_PALETTE.length]);
     }
     return deviceColorCache.get(name);
   }
@@ -543,6 +563,8 @@
         }],
       },
       options: {
+        responsive: true,
+        maintainAspectRatio: false,  // square wrapper drives both dimensions
         plugins: { legend: { display: false }, tooltip: {
           callbacks: { label: ctx => `${ctx.label}: ${fmtKwh(ctx.parsed)} (${((ctx.parsed/total)*100).toFixed(1)}%)` }
         }},
