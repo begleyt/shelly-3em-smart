@@ -96,6 +96,8 @@ class ShellyAddonClient:
         condition: str | None = None,
         source: str | None = None,
         ts: float | None = None,
+        forecast_high_f: float | None = None,
+        forecast_low_f: float | None = None,
     ) -> None:
         payload = {
             "temp_f": temp_f,
@@ -103,10 +105,61 @@ class ShellyAddonClient:
             "condition": condition,
             "source": source,
             "ts": ts,
+            "forecast_high_f": forecast_high_f,
+            "forecast_low_f": forecast_low_f,
         }
         try:
             async with self._session.post(
                 f"{self._base}/weather_reading",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as r:
+                r.raise_for_status()
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            pass
+
+    async def post_gas_reading(
+        self,
+        cumulative: float,
+        unit: str | None = None,
+        source: str | None = None,
+        ts: float | None = None,
+    ) -> None:
+        payload = {"cumulative": cumulative, "unit": unit, "source": source, "ts": ts}
+        try:
+            async with self._session.post(
+                f"{self._base}/gas_reading",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as r:
+                r.raise_for_status()
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            pass
+
+    async def post_setpoint_reading(
+        self,
+        entity_id: str,
+        target_temp_f: float | None = None,
+        target_low_f: float | None = None,
+        target_high_f: float | None = None,
+        current_temp_f: float | None = None,
+        hvac_mode: str | None = None,
+        hvac_action: str | None = None,
+        ts: float | None = None,
+    ) -> None:
+        payload = {
+            "entity_id": entity_id,
+            "target_temp_f": target_temp_f,
+            "target_low_f": target_low_f,
+            "target_high_f": target_high_f,
+            "current_temp_f": current_temp_f,
+            "hvac_mode": hvac_mode,
+            "hvac_action": hvac_action,
+            "ts": ts,
+        }
+        try:
+            async with self._session.post(
+                f"{self._base}/setpoint_reading",
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as r:

@@ -177,6 +177,49 @@ CREATE TABLE IF NOT EXISTS app_settings (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Cumulative natural-gas (or propane / oil) usage reported by a HA sensor.*
+-- entity. Normalised to therms on ingest (1 therm ≈ 29.3 kWh thermal) so the
+-- daily rollup math is consistent regardless of HA's raw unit.
+CREATE TABLE IF NOT EXISTS gas_samples (
+    ts                REAL PRIMARY KEY,
+    cumulative_therms REAL,
+    raw_value         REAL,
+    raw_unit          TEXT,
+    source            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_gas_samples_ts ON gas_samples(ts);
+
+-- Setpoint + current-temp time series from one or more HA climate.* entities.
+-- target_temp_f is the single setpoint; target_low_f / target_high_f populated
+-- for dual-setpoint heat_cool mode. hvac_mode is the user-selected mode
+-- (heat, cool, heat_cool, off, auto); hvac_action is what the unit is actually
+-- doing right now (heating, cooling, fan, idle, off).
+CREATE TABLE IF NOT EXISTS setpoint_samples (
+    ts             REAL,
+    entity_id      TEXT,
+    target_temp_f  REAL,
+    target_low_f   REAL,
+    target_high_f  REAL,
+    current_temp_f REAL,
+    hvac_mode      TEXT,
+    hvac_action    TEXT,
+    PRIMARY KEY (ts, entity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_setpoint_samples_entity_ts ON setpoint_samples(entity_id, ts);
+
+-- Forecast high/low for the current local day, refreshed periodically by the
+-- HACS integration. One row, replaced each push, so the dashboard can show
+-- meaningful day H/L early in the morning before the empirical min/max has
+-- built up. Empirical observations override these once they're outside the
+-- forecast range (real beats predicted).
+CREATE TABLE IF NOT EXISTS weather_forecast_today (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    date_str      TEXT NOT NULL,
+    forecast_high_f REAL,
+    forecast_low_f  REAL,
+    ts            REAL NOT NULL
+);
 """
 
 
@@ -222,6 +265,28 @@ def _migrate(c: sqlite3.Connection) -> None:
 
     if "is_hvac" not in cols:
         c.execute("ALTER TABLE devices ADD COLUMN is_hvac INTEGER NOT NULL DEFAULT 0")
+
+    if "hvac_role" not in cols:
+        # 'cooling' | 'heating' | NULL. Supersedes is_hvac. Backfill: any
+        # legacy is_hvac=1 device is treated as cooling (matches the 0.6.0
+        # use case where users tagged their AC).
+        c.execute("ALTER TABLE devices ADD COLUMN hvac_role TEXT")
+        c.execute("UPDATE devices SET hvac_role = 'cooling' WHERE is_hvac = 1 AND hvac_role IS NULL")
+
+    # Extend daily_rollups with per-role energy + gas + setpoint averages.
+    cur = c.execute("PRAGMA table_info(daily_rollups)")
+    rcols = {row[1] for row in cur.fetchall()}
+    for col, ddl in (
+        ("cooling_wh",           "ALTER TABLE daily_rollups ADD COLUMN cooling_wh REAL"),
+        ("heating_wh",           "ALTER TABLE daily_rollups ADD COLUMN heating_wh REAL"),
+        ("heating_therms",       "ALTER TABLE daily_rollups ADD COLUMN heating_therms REAL"),
+        ("avg_cool_setpoint_f",  "ALTER TABLE daily_rollups ADD COLUMN avg_cool_setpoint_f REAL"),
+        ("avg_heat_setpoint_f",  "ALTER TABLE daily_rollups ADD COLUMN avg_heat_setpoint_f REAL"),
+        ("forecast_high_f",      "ALTER TABLE daily_rollups ADD COLUMN forecast_high_f REAL"),
+        ("forecast_low_f",       "ALTER TABLE daily_rollups ADD COLUMN forecast_low_f REAL"),
+    ):
+        if col not in rcols:
+            c.execute(ddl)
 
 
 def conn() -> sqlite3.Connection:

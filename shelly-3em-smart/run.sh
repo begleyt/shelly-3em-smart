@@ -21,6 +21,8 @@ export WEATHER_ENTITY_ID="$(bashio::config 'weather_entity_id')"
 export HDD_CDD_BASE_TEMP_F="$(bashio::config 'hdd_cdd_base_temp_f')"
 export TEMP_UNIT="$(bashio::config 'temp_unit')"
 export WEATHER_RETENTION_DAYS="$(bashio::config 'weather_retention_days')"
+export GAS_RATE_DOLLARS_PER_THERM="$(bashio::config 'gas_rate_dollars_per_therm')"
+export HEATING_FUEL_KIND="$(bashio::config 'heating_fuel_kind')"
 
 export DB_PATH="/data/shelly.db"
 export HTTP_PORT="8080"
