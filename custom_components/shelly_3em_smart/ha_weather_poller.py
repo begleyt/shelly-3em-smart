@@ -68,7 +68,6 @@ def _read_today_forecast(state, hass: HomeAssistant) -> tuple[Optional[float], O
     forecast = state.attributes.get("forecast") or []
     if not forecast:
         return (None, None)
-    # First entry is usually today's daily forecast
     first = forecast[0] if isinstance(forecast, list) else None
     if not isinstance(first, dict):
         return (None, None)
@@ -79,11 +78,55 @@ def _read_today_forecast(state, hass: HomeAssistant) -> tuple[Optional[float], O
     except Exception:
         pass
 
-    high = first.get("temperature")    # 'temperature' is HA's daily high convention
+    high = first.get("temperature")
     low = first.get("templow")
     high_f = _to_fahrenheit(float(high), unit) if isinstance(high, (int, float)) else None
     low_f = _to_fahrenheit(float(low), unit) if isinstance(low, (int, float)) else None
     return (high_f, low_f)
+
+
+def _read_multi_day_forecast(state, hass: HomeAssistant) -> list[dict]:
+    """Pull the full N-day forecast from the weather entity's `forecast`
+    attribute. Each entry: {date_str, forecast_high_f, forecast_low_f,
+    condition}. Skips entries without a valid datetime or temperature."""
+    forecast = state.attributes.get("forecast") or []
+    if not isinstance(forecast, list):
+        return []
+
+    unit = state.attributes.get("temperature_unit") or "C"
+    try:
+        unit = hass.config.units.temperature_unit
+    except Exception:
+        pass
+
+    out = []
+    for entry in forecast[:14]:    # cap at 2 weeks to be safe
+        if not isinstance(entry, dict):
+            continue
+        dt = entry.get("datetime") or entry.get("date")
+        if not dt:
+            continue
+        # Normalise to YYYY-MM-DD; HA gives ISO 8601 typically
+        if isinstance(dt, str):
+            date_str = dt[:10]
+        else:
+            try:
+                date_str = dt.date().isoformat()
+            except Exception:
+                continue
+        high = entry.get("temperature")
+        low = entry.get("templow")
+        high_f = _to_fahrenheit(float(high), unit) if isinstance(high, (int, float)) else None
+        low_f = _to_fahrenheit(float(low), unit) if isinstance(low, (int, float)) else None
+        if high_f is None and low_f is None:
+            continue
+        out.append({
+            "date_str": date_str,
+            "forecast_high_f": high_f,
+            "forecast_low_f": low_f,
+            "condition": entry.get("condition"),
+        })
+    return out
 
 
 def setup_weather_poller(
@@ -113,9 +156,14 @@ def setup_weather_poller(
         humidity = state.attributes.get("humidity")
         condition = state.state if state.entity_id.startswith("weather.") else None
         high_f, low_f = (None, None)
+        multi_day = []
         if state.entity_id.startswith("weather."):
             try:
                 high_f, low_f = _read_today_forecast(state, hass)
+            except Exception:
+                pass
+            try:
+                multi_day = _read_multi_day_forecast(state, hass)
             except Exception:
                 pass
         hass.async_create_task(
@@ -127,6 +175,7 @@ def setup_weather_poller(
                 ts=None,
                 forecast_high_f=high_f,
                 forecast_low_f=low_f,
+                forecast_days=multi_day,
             )
         )
 

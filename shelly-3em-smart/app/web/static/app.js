@@ -421,9 +421,10 @@
   // --- Insights ---
   async function loadInsights() {
     try {
-      const [insR, histR] = await Promise.all([
+      const [insR, histR, fcR] = await Promise.all([
         fetch(API + '/insights'),
         fetch(API + '/history_summary'),
+        fetch(API + '/forecast/energy?days_ahead=7'),
       ]);
       if (insR.ok) {
         renderInsights(await insR.json());
@@ -431,9 +432,99 @@
       if (histR.ok) {
         renderHistory(await histR.json());
       }
+      if (fcR.ok) {
+        renderForecast(await fcR.json());
+      }
     } catch (e) {
       console.warn('insights fetch failed', e);
     }
+  }
+
+  let forecastChart = null;
+  function renderForecast(fc) {
+    const card = $('forecast-card');
+    if (!fc || !fc.has_forecast || !fc.days || !fc.days.length) {
+      card.style.display = 'none';
+      return;
+    }
+    card.style.display = '';
+    const sym = (appInfo && appInfo.currency_symbol) || fc.currency_symbol || '$';
+    const rate = (appInfo && appInfo.rate_cents_per_kwh) || fc.rate_cents_per_kwh || 0;
+    const hasRate = rate > 0;
+    const unit = (appInfo && appInfo.temp_unit) || fc.temp_unit || 'F';
+
+    // Tomorrow stats
+    const tomorrow = fc.days[0];
+    if (tomorrow) {
+      $('forecast-tomorrow-kwh').textContent = `${tomorrow.predicted_kwh.toFixed(1)} kWh`;
+      $('forecast-tomorrow-cost').textContent = hasRate ? `${sym}${tomorrow.predicted_cost.toFixed(2)}` : '';
+      const high = tomorrow.forecast_high_f;
+      const low = tomorrow.forecast_low_f;
+      if (high !== null && low !== null) {
+        $('forecast-tomorrow-temp').textContent =
+          `${fmtTemp(high, unit)} / ${fmtTemp(low, unit)} · ${tomorrow.condition || ''}`;
+      } else {
+        $('forecast-tomorrow-temp').textContent = '';
+      }
+    }
+
+    // Week stats
+    $('forecast-week-kwh').textContent = `${fc.total_kwh.toFixed(1)} kWh`;
+    $('forecast-week-cost').textContent = hasRate ? `${sym}${fc.total_cost.toFixed(2)}` : '';
+    $('forecast-week-meta').textContent = `${fc.days.length} days`;
+
+    // Chart: bars per day for predicted kWh
+    const canvas = $('forecast-chart');
+    if (!canvas) return;
+    const labels = fc.days.map(d => d.date_str.slice(5));
+    const kwh = fc.days.map(d => d.predicted_kwh);
+    if (forecastChart) forecastChart.destroy();
+    forecastChart = new Chart(canvas, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Predicted kWh',
+          data: kwh,
+          backgroundColor: '#4e79a7',
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: {
+            label: ctx => {
+              const d = fc.days[ctx.dataIndex];
+              const lines = [`${d.predicted_kwh.toFixed(1)} kWh`];
+              if (hasRate) lines.push(`${sym}${d.predicted_cost.toFixed(2)}`);
+              if (d.forecast_high_f !== null) {
+                lines.push(`${fmtTemp(d.forecast_high_f, unit)} / ${fmtTemp(d.forecast_low_f, unit)}`);
+              }
+              return lines.join(' · ');
+            },
+          }},
+        },
+        scales: {
+          x: { ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' } },
+          y: { title: { display: true, text: 'kWh', color: '#8a93a6' },
+               ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' }, beginAtZero: true },
+        },
+      },
+    });
+
+    // Method note
+    let methodTxt;
+    if (fc.model_r_squared !== null) {
+      methodTxt = `Predictions from HDD/CDD regression (R² ${fc.model_r_squared.toFixed(2)}, n=${fc.model_n}) on the last 30 days, applied to your weather entity's daily forecast.`;
+    } else {
+      const src = fc.days[0] && fc.days[0].source;
+      methodTxt = src === 'recent_average'
+        ? 'Using the last 30-day average kWh — fitted regression will activate once there are 5+ completed days with temperature data.'
+        : 'No model yet — gathering data.';
+    }
+    $('forecast-method-note').textContent = methodTxt;
   }
 
   function renderHistory(hist) {
@@ -516,13 +607,21 @@
     }
   }
 
-  // --- Setpoint control + savings preview ---
+  // --- Setpoint control: round Nest-style dial + savings preview ---
   let currentEntities = [];
   let currentSavings = null;
   let savingsBounds = null;
   let savingsUnit = 'F';
   let originalCool = null, originalHeat = null;
   let desiredCoolF = null, desiredHeatF = null;
+  let dialMode = 'cool';   // 'cool' | 'heat' — which setpoint the dial controls
+
+  // Dial geometry
+  const DIAL_CX = 160, DIAL_CY = 160, DIAL_R = 140;
+  // Sweep across the top 270° of the circle (135°→405° in standard math
+  // coords). We use SVG angle space here (0° = +x, CCW positive).
+  const DIAL_START_DEG = -210;     // bottom-left
+  const DIAL_END_DEG   =   30;     // bottom-right (240° sweep)
 
   function _fmtMoney(amount, currency = '$') {
     if (amount === null || amount === undefined) return '—';
@@ -530,26 +629,67 @@
     return `${sign}${currency}${Math.abs(amount).toFixed(2)}`;
   }
 
+  // Convert temperature to angle around the dial. Linear interpolation
+  // between the bounds for the active mode.
+  function _tempToAngle(t) {
+    const range = _activeBounds();
+    if (!range) return DIAL_START_DEG;
+    const frac = Math.max(0, Math.min(1, (t - range.min) / (range.max - range.min)));
+    return DIAL_START_DEG + frac * (DIAL_END_DEG - DIAL_START_DEG);
+  }
+  function _angleToTemp(angleDeg) {
+    const range = _activeBounds();
+    if (!range) return null;
+    const frac = (angleDeg - DIAL_START_DEG) / (DIAL_END_DEG - DIAL_START_DEG);
+    return range.min + Math.max(0, Math.min(1, frac)) * (range.max - range.min);
+  }
+  function _activeBounds() {
+    if (!savingsBounds) return null;
+    return dialMode === 'cool'
+      ? { min: savingsBounds.cool_min_f, max: savingsBounds.cool_max_f }
+      : { min: savingsBounds.heat_min_f, max: savingsBounds.heat_max_f };
+  }
+  function _polar(cx, cy, r, angleDeg) {
+    const rad = angleDeg * Math.PI / 180;
+    return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+  }
+
+  // Extrapolate beyond the server's computed deltas. Server only returns
+  // scenarios at [-2,-1,+1,+2] so we interp/extrap to get smooth dial feel.
   function _approxScenario(direction, deltaF) {
     if (!currentSavings || !currentSavings[direction] || !currentSavings[direction].scenarios) return null;
     const sc = currentSavings[direction].scenarios;
+    if (!sc.length) return null;
     const exact = sc.find(s => Math.abs(s.delta_f - deltaF) < 0.01);
     if (exact) return exact;
     const sorted = [...sc].sort((a,b) => a.delta_f - b.delta_f);
-    let lo = null, hi = null;
-    for (const s of sorted) {
-      if (s.delta_f <= deltaF) lo = s;
-      if (s.delta_f >= deltaF && hi === null) hi = s;
-    }
-    if (lo && hi && lo.delta_f !== hi.delta_f) {
+    if (deltaF >= sorted[0].delta_f && deltaF <= sorted[sorted.length - 1].delta_f) {
+      let lo = sorted[0], hi = sorted[sorted.length - 1];
+      for (let i = 0; i < sorted.length - 1; i++) {
+        if (sorted[i].delta_f <= deltaF && sorted[i+1].delta_f >= deltaF) {
+          lo = sorted[i]; hi = sorted[i+1]; break;
+        }
+      }
+      if (lo.delta_f === hi.delta_f) return lo;
       const t = (deltaF - lo.delta_f) / (hi.delta_f - lo.delta_f);
       return {
         delta_f: deltaF,
-        monthly_kwh_delta: lo.monthly_kwh_delta + t * (hi.monthly_kwh_delta - lo.monthly_kwh_delta),
+        monthly_kwh_delta:  lo.monthly_kwh_delta  + t * (hi.monthly_kwh_delta  - lo.monthly_kwh_delta),
         monthly_cost_delta: lo.monthly_cost_delta + t * (hi.monthly_cost_delta - lo.monthly_cost_delta),
       };
     }
-    return lo || hi;
+    // Extrapolate
+    const useLow = deltaF < sorted[0].delta_f;
+    const a = useLow ? sorted[0] : sorted[sorted.length - 2];
+    const b = useLow ? sorted[1] : sorted[sorted.length - 1];
+    if (a.delta_f === b.delta_f) return a;
+    const slopeKwh  = (b.monthly_kwh_delta  - a.monthly_kwh_delta)  / (b.delta_f - a.delta_f);
+    const slopeCost = (b.monthly_cost_delta - a.monthly_cost_delta) / (b.delta_f - a.delta_f);
+    return {
+      delta_f: deltaF,
+      monthly_kwh_delta:  a.monthly_kwh_delta  + slopeKwh  * (deltaF - a.delta_f),
+      monthly_cost_delta: a.monthly_cost_delta + slopeCost * (deltaF - a.delta_f),
+    };
   }
 
   function _entitySetpoints(e) {
@@ -566,113 +706,234 @@
 
   function renderSetpointControl(entities, savings, bounds, unit) {
     const card = $('setpoint-control-card');
-    if (!entities.length) { card.style.display = 'none'; return; }
+    if (!entities.length && !(savings && (savings.cooling || savings.heating))) {
+      card.style.display = 'none'; return;
+    }
     card.style.display = '';
     currentEntities = entities;
     currentSavings = savings;
-    savingsBounds = bounds;
+    // Fall back to default bounds if endpoint hasn't loaded
+    savingsBounds = bounds || { cool_min_f: 60, cool_max_f: 85, heat_min_f: 55, heat_max_f: 80, ha_api_available: false };
     savingsUnit = unit;
 
-    $('setpoint-needs-api').style.display = (bounds && bounds.ha_api_available) ? 'none' : '';
+    $('setpoint-needs-api').style.display = savingsBounds.ha_api_available ? 'none' : '';
 
     const sel = $('setpoint-entity-select');
-    const prev = sel.value;
-    sel.innerHTML = entities.map(e => {
-      const action = e.hvac_action ? ` · ${e.hvac_action}` : '';
-      const mode = e.hvac_mode ? ` (${e.hvac_mode})` : '';
-      return `<option value="${e.entity_id}">${e.entity_id}${mode}${action}</option>`;
-    }).join('');
-    sel.value = prev && entities.find(e => e.entity_id === prev) ? prev : entities[0].entity_id;
+    if (entities.length) {
+      const prev = sel.value;
+      sel.innerHTML = entities.map(e => {
+        const action = e.hvac_action ? ` · ${e.hvac_action}` : '';
+        const mode = e.hvac_mode ? ` (${e.hvac_mode})` : '';
+        return `<option value="${e.entity_id}">${e.entity_id}${mode}${action}</option>`;
+      }).join('');
+      sel.value = prev && entities.find(e => e.entity_id === prev) ? prev : entities[0].entity_id;
+    } else {
+      sel.innerHTML = `<option value="">(no thermostat data yet)</option>`;
+    }
 
     _refreshControlsFromSelection();
-
-    let methodTxt = [];
-    for (const dir of ['cooling', 'heating']) {
-      const s = savings && savings[dir];
-      if (!s) continue;
-      if (s.has_model) {
-        methodTxt.push(`${dir}: fitted regression (R² ${s.r_squared.toFixed(2)}, n=${s.n})`);
-      } else if (s.method === 'rule_of_thumb_5pct') {
-        methodTxt.push(`${dir}: rule of thumb (~5%/°F) — ${s.needs}`);
-      } else if (s.method === 'no_setpoint_data') {
-        methodTxt.push(`${dir}: ${s.needs}`);
-      }
-    }
-    $('savings-method-note').innerHTML = methodTxt.join('<br/>');
+    _renderDialTicks();
+    _redrawDial();
   }
 
   function _refreshControlsFromSelection() {
     const sel = $('setpoint-entity-select');
     const ent = currentEntities.find(e => e.entity_id === sel.value);
     const sp = _entitySetpoints(ent);
+
+    // Fall back to savings model's default-setpoint when no live data
+    if (sp.cool === null && currentSavings && currentSavings.cooling && currentSavings.cooling.current_setpoint_f != null) {
+      sp.cool = currentSavings.cooling.current_setpoint_f;
+    }
+    if (sp.heat === null && currentSavings && currentSavings.heating && currentSavings.heating.current_setpoint_f != null) {
+      sp.heat = currentSavings.heating.current_setpoint_f;
+    }
     originalCool = sp.cool;
     originalHeat = sp.heat;
     desiredCoolF = sp.cool;
     desiredHeatF = sp.heat;
 
-    const coolSlider = $('cool-slider');
-    if (sp.cool !== null && sp.cool !== undefined && savingsBounds) {
-      coolSlider.min = savingsBounds.cool_min_f;
-      coolSlider.max = savingsBounds.cool_max_f;
-      coolSlider.value = Math.round(sp.cool);
-      coolSlider.disabled = false;
-      $('cool-current').textContent = `now ${fmtTemp(sp.cool, savingsUnit)}`;
-    } else {
-      coolSlider.disabled = true;
-      $('cool-current').textContent = 'not in this mode';
-    }
-    const heatSlider = $('heat-slider');
-    if (sp.heat !== null && sp.heat !== undefined && savingsBounds) {
-      heatSlider.min = savingsBounds.heat_min_f;
-      heatSlider.max = savingsBounds.heat_max_f;
-      heatSlider.value = Math.round(sp.heat);
-      heatSlider.disabled = false;
-      $('heat-current').textContent = `now ${fmtTemp(sp.heat, savingsUnit)}`;
-    } else {
-      heatSlider.disabled = true;
-      $('heat-current').textContent = 'not in this mode';
-    }
+    // Mode toggle availability
+    const coolBtn = $('mode-cool');
+    const heatBtn = $('mode-heat');
+    coolBtn.disabled = (sp.cool === null);
+    heatBtn.disabled = (sp.heat === null);
+    $('mode-cool-current').textContent = sp.cool !== null ? fmtTemp(sp.cool, savingsUnit) : '—';
+    $('mode-heat-current').textContent = sp.heat !== null ? fmtTemp(sp.heat, savingsUnit) : '—';
+
+    // Pick default active mode based on what's available
+    if (sp.cool !== null && !coolBtn.disabled) dialMode = 'cool';
+    else if (sp.heat !== null) dialMode = 'heat';
+
+    _setActiveModeUI();
     _refreshScenarios();
+  }
+
+  function _setActiveModeUI() {
+    document.querySelectorAll('.mode-pill').forEach(b => b.classList.remove('active'));
+    const btn = $('mode-' + dialMode);
+    if (btn) btn.classList.add('active');
+    const dial = $('thermostat-dial');
+    dial.classList.remove('cool', 'heat');
+    dial.classList.add(dialMode);
+  }
+
+  function _activeSetpoint() {
+    return dialMode === 'cool' ? desiredCoolF : desiredHeatF;
+  }
+  function _setActiveSetpoint(value) {
+    const bounds = _activeBounds();
+    if (!bounds) return;
+    const v = Math.max(bounds.min, Math.min(bounds.max, value));
+    if (dialMode === 'cool') desiredCoolF = v;
+    else desiredHeatF = v;
+  }
+  function _originalSetpoint() {
+    return dialMode === 'cool' ? originalCool : originalHeat;
+  }
+
+  function _renderDialTicks() {
+    const g = $('thermostat-ticks');
+    g.innerHTML = '';
+    const bounds = _activeBounds();
+    if (!bounds) return;
+    const range = bounds.max - bounds.min;
+    // One tick per degree; bolder every 5
+    for (let t = bounds.min; t <= bounds.max; t++) {
+      const angle = DIAL_START_DEG + ((t - bounds.min) / range) * (DIAL_END_DEG - DIAL_START_DEG);
+      const inner = _polar(DIAL_CX, DIAL_CY, DIAL_R, angle);
+      const outer = _polar(DIAL_CX, DIAL_CY, DIAL_R + ((t % 5 === 0) ? 14 : 8), angle);
+      const cls = (t % 5 === 0) ? 'active' : '';
+      g.insertAdjacentHTML('beforeend',
+        `<line x1="${inner.x.toFixed(1)}" y1="${inner.y.toFixed(1)}" ` +
+        `x2="${outer.x.toFixed(1)}" y2="${outer.y.toFixed(1)}" class="${cls}"/>`);
+    }
+  }
+
+  function _redrawDial() {
+    const sp = _activeSetpoint();
+    const orig = _originalSetpoint();
+    const bounds = _activeBounds();
+    if (sp == null || !bounds) {
+      $('dial-setpoint-text').textContent = '—';
+      $('dial-mode-text').textContent = '—';
+      $('thermostat-arc').setAttribute('d', '');
+      return;
+    }
+    $('dial-setpoint-text').textContent = `${Math.round(sp)}°`;
+    $('dial-mode-text').textContent = (dialMode === 'cool' ? 'COOL TO' : 'HEAT TO');
+    // Show current entity's current_temp_f as inside temp
+    const sel = $('setpoint-entity-select');
+    const ent = currentEntities.find(e => e.entity_id === sel.value);
+    if (ent && ent.current_temp_f != null) {
+      $('dial-current-text').textContent = `inside ${fmtTemp(ent.current_temp_f, savingsUnit)}`;
+    } else {
+      $('dial-current-text').textContent = '';
+    }
+
+    // Arc from "original" angle to "desired" angle
+    const origAngle = _tempToAngle(orig);
+    const newAngle = _tempToAngle(sp);
+    const a0 = _polar(DIAL_CX, DIAL_CY, DIAL_R, origAngle);
+    const a1 = _polar(DIAL_CX, DIAL_CY, DIAL_R, newAngle);
+    const sweep = (newAngle > origAngle) ? 1 : 0;
+    const largeArc = Math.abs(newAngle - origAngle) > 180 ? 1 : 0;
+    const arc = `M ${a0.x.toFixed(1)} ${a0.y.toFixed(1)} A ${DIAL_R} ${DIAL_R} 0 ${largeArc} ${sweep} ${a1.x.toFixed(1)} ${a1.y.toFixed(1)}`;
+    $('thermostat-arc').setAttribute('d', arc);
+
+    // Handle position at current desired
+    const handle = $('thermostat-handle');
+    handle.setAttribute('cx', a1.x.toFixed(1));
+    handle.setAttribute('cy', a1.y.toFixed(1));
   }
 
   function _refreshScenarios() {
     const sym = (currentSavings && currentSavings.currency_symbol) || '$';
-    if (desiredCoolF !== null && originalCool !== null) {
-      const dF = desiredCoolF - originalCool;
-      $('cool-target').textContent = `→ ${fmtTemp(desiredCoolF, savingsUnit)} ${dF !== 0 ? `(${dF > 0 ? '+' : ''}${dF.toFixed(0)}°)` : ''}`;
-      const scenario = dF === 0 ? null : _approxScenario('cooling', dF);
-      const el = $('cool-savings');
-      el.classList.remove('save', 'cost');
+    const sp = _activeSetpoint();
+    const orig = _originalSetpoint();
+    if (sp == null || orig == null) {
+      $('scenario-headline').textContent = '—';
+      $('scenario-detail').textContent = 'Pick a thermostat to start.';
+      $('scenario-method').textContent = '';
+      $('scenario-card').classList.remove('save', 'cost');
+      $('scenario-headline').classList.remove('save', 'cost');
+      _redrawDial();
+      return;
+    }
+    const dF = sp - orig;
+    const card = $('scenario-card');
+    const headline = $('scenario-headline');
+    card.classList.remove('save', 'cost');
+    headline.classList.remove('save', 'cost');
+    if (Math.abs(dF) < 0.01) {
+      headline.textContent = 'No change';
+      $('scenario-detail').textContent = 'Move the dial to preview the impact.';
+    } else {
+      const direction = dialMode === 'cool' ? 'cooling' : 'heating';
+      const scenario = _approxScenario(direction, dF);
       if (!scenario) {
-        el.textContent = dF === 0 ? 'no change' : 'no model — set a few different setpoints over the coming days';
+        headline.textContent = `${dF > 0 ? '+' : ''}${dF.toFixed(0)}°`;
+        $('scenario-detail').textContent = 'Not enough data yet to estimate cost impact.';
       } else {
         const c = scenario.monthly_cost_delta;
         const k = scenario.monthly_kwh_delta;
-        el.textContent = `≈ ${_fmtMoney(c, sym)}/mo (${k >= 0 ? '+' : ''}${k.toFixed(1)} kWh)`;
-        el.classList.add(c <= 0 ? 'save' : 'cost');
+        headline.textContent = `${_fmtMoney(c, sym)}/mo`;
+        $('scenario-detail').textContent =
+          `${dF > 0 ? '+' : ''}${dF.toFixed(0)}°F · ${k >= 0 ? '+' : ''}${k.toFixed(1)} kWh/month`;
+        const cls = c <= 0 ? 'save' : 'cost';
+        card.classList.add(cls);
+        headline.classList.add(cls);
       }
-    } else {
-      $('cool-target').textContent = '—';
-      $('cool-savings').textContent = '—';
     }
-    if (desiredHeatF !== null && originalHeat !== null) {
-      const dF = desiredHeatF - originalHeat;
-      $('heat-target').textContent = `→ ${fmtTemp(desiredHeatF, savingsUnit)} ${dF !== 0 ? `(${dF > 0 ? '+' : ''}${dF.toFixed(0)}°)` : ''}`;
-      const scenario = dF === 0 ? null : _approxScenario('heating', dF);
-      const el = $('heat-savings');
-      el.classList.remove('save', 'cost');
-      if (!scenario) {
-        el.textContent = dF === 0 ? 'no change' : 'no model — set a few different setpoints over the coming days';
-      } else {
-        const c = scenario.monthly_cost_delta;
-        const k = scenario.monthly_kwh_delta;
-        el.textContent = `≈ ${_fmtMoney(c, sym)}/mo (${k >= 0 ? '+' : ''}${k.toFixed(1)} kWh)`;
-        el.classList.add(c <= 0 ? 'save' : 'cost');
+    // Method note
+    if (currentSavings) {
+      const dirKey = dialMode === 'cool' ? 'cooling' : 'heating';
+      const s = currentSavings[dirKey];
+      if (s && s.has_model) {
+        $('scenario-method').textContent =
+          `Fitted regression · R² ${s.r_squared.toFixed(2)}, n=${s.n}`;
+      } else if (s && s.method === 'rule_of_thumb_5pct') {
+        const basis = (s.scenarios && s.scenarios[0] && s.scenarios[0].basis) || 'rule_of_thumb';
+        $('scenario-method').textContent = basis === 'role_energy'
+          ? 'Rule of thumb (~5%/°F) on your tagged HVAC device — fitted regression activates once you have ~14 days with setpoint variance.'
+          : basis === 'no_data'
+          ? 'Need a few days of energy data to estimate — please wait.'
+          : 'Rule of thumb (~5%/°F) on whole-panel energy × HVAC fraction — tag a cooling/heating device for tighter estimates.';
+      } else if (s) {
+        $('scenario-method').textContent = s.needs || '';
       }
-    } else {
-      $('heat-target').textContent = '—';
-      $('heat-savings').textContent = '—';
     }
+    _redrawDial();
+  }
+
+  // --- Dial drag interaction ---
+  let dragging = false;
+  function _dialPointerToAngle(evt) {
+    const svg = $('thermostat-dial');
+    const pt = svg.createSVGPoint();
+    pt.x = evt.clientX;
+    pt.y = evt.clientY;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return null;
+    const local = pt.matrixTransform(ctm.inverse());
+    const dx = local.x - DIAL_CX;
+    const dy = local.y - DIAL_CY;
+    let ang = Math.atan2(dy, dx) * 180 / Math.PI;
+    // Clamp to dial sweep
+    // Normalise angle to be near our start..end range (start is -210 ≈ 150)
+    if (ang < -180) ang += 360;
+    if (ang > 180) ang -= 360;
+    // Our sweep: -210 → 30, which after normalization means clamp to:
+    //   ang in [-180, 30] OR [150, 180]
+    // Easier: shift everything by 90 and clamp continuously.
+    const shift = (a) => {
+      let x = a + 210;            // start at 0
+      if (x < 0) x += 360;
+      return x;                   // 0..360, sweep is 0..240
+    };
+    const xx = shift(ang);
+    const clamped = Math.max(0, Math.min(240, xx));
+    return DIAL_START_DEG + clamped;
   }
 
   function _initSetpointControlsOnce() {
@@ -682,29 +943,58 @@
     if (!sel) return;
     sel.addEventListener('change', _refreshControlsFromSelection);
 
-    $('cool-slider').addEventListener('input', (e) => {
-      desiredCoolF = Number(e.target.value);
+    $('mode-cool').addEventListener('click', () => {
+      if ($('mode-cool').disabled) return;
+      dialMode = 'cool';
+      _setActiveModeUI();
+      _renderDialTicks();
       _refreshScenarios();
     });
-    $('heat-slider').addEventListener('input', (e) => {
-      desiredHeatF = Number(e.target.value);
+    $('mode-heat').addEventListener('click', () => {
+      if ($('mode-heat').disabled) return;
+      dialMode = 'heat';
+      _setActiveModeUI();
+      _renderDialTicks();
       _refreshScenarios();
     });
 
-    document.querySelectorAll('.setpoint-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const dir = btn.dataset.direction;
-        const delta = Number(btn.dataset.delta);
-        if (dir === 'cool' && desiredCoolF !== null && savingsBounds) {
-          desiredCoolF = Math.max(savingsBounds.cool_min_f, Math.min(savingsBounds.cool_max_f, desiredCoolF + delta));
-          $('cool-slider').value = desiredCoolF;
-        } else if (dir === 'heat' && desiredHeatF !== null && savingsBounds) {
-          desiredHeatF = Math.max(savingsBounds.heat_min_f, Math.min(savingsBounds.heat_max_f, desiredHeatF + delta));
-          $('heat-slider').value = desiredHeatF;
-        }
-        _refreshScenarios();
-      });
+    $('dial-minus').addEventListener('click', () => {
+      const cur = _activeSetpoint();
+      if (cur == null) return;
+      _setActiveSetpoint(cur - 1);
+      _refreshScenarios();
     });
+    $('dial-plus').addEventListener('click', () => {
+      const cur = _activeSetpoint();
+      if (cur == null) return;
+      _setActiveSetpoint(cur + 1);
+      _refreshScenarios();
+    });
+
+    // Drag the handle
+    const svg = $('thermostat-dial');
+    function onMove(e) {
+      if (!dragging) return;
+      e.preventDefault();
+      const ang = _dialPointerToAngle(e);
+      if (ang == null) return;
+      const t = _angleToTemp(ang);
+      if (t == null) return;
+      _setActiveSetpoint(Math.round(t));
+      _refreshScenarios();
+    }
+    svg.addEventListener('pointerdown', (e) => {
+      // Only respond when clicking on the handle or near the ring
+      dragging = true;
+      svg.setPointerCapture(e.pointerId);
+      onMove(e);
+    });
+    svg.addEventListener('pointermove', onMove);
+    svg.addEventListener('pointerup', (e) => {
+      dragging = false;
+      try { svg.releasePointerCapture(e.pointerId); } catch (_) {}
+    });
+    svg.addEventListener('pointercancel', () => { dragging = false; });
 
     $('setpoint-reset').addEventListener('click', () => {
       _refreshControlsFromSelection();
@@ -713,26 +1003,27 @@
 
     $('setpoint-apply').addEventListener('click', async () => {
       const entity = $('setpoint-entity-select').value;
+      if (!entity) {
+        $('setpoint-status').textContent = 'No thermostat selected.';
+        return;
+      }
       const ent = currentEntities.find(e => e.entity_id === entity);
-      const sp = _entitySetpoints(ent);
       const payload = { entity_id: entity, ha_temp_unit: savingsUnit };
-      if (sp.cool !== null && desiredCoolF !== null && desiredCoolF !== originalCool) {
-        if (ent.target_high_f !== null && ent.target_high_f !== undefined) {
-          payload.target_high_f = desiredCoolF;
-          payload.target_low_f = (desiredHeatF !== null) ? desiredHeatF : ent.target_low_f;
-        } else {
-          payload.target_temp_f = desiredCoolF;
-        }
-      } else if (sp.heat !== null && desiredHeatF !== null && desiredHeatF !== originalHeat) {
-        if (ent.target_low_f !== null && ent.target_low_f !== undefined) {
-          payload.target_low_f = desiredHeatF;
-          payload.target_high_f = (desiredCoolF !== null) ? desiredCoolF : ent.target_high_f;
-        } else {
-          payload.target_temp_f = desiredHeatF;
-        }
-      } else {
+      // Send only what changed in the active mode; keep the other side at
+      // its original value so heat_cool entities don't get a partial write.
+      const coolChanged = desiredCoolF !== null && originalCool !== null && Math.abs(desiredCoolF - originalCool) >= 0.5;
+      const heatChanged = desiredHeatF !== null && originalHeat !== null && Math.abs(desiredHeatF - originalHeat) >= 0.5;
+      if (!coolChanged && !heatChanged) {
         $('setpoint-status').textContent = 'No change to apply.';
         return;
+      }
+      if (ent && ent.target_high_f !== null && ent.target_high_f !== undefined) {
+        // dual setpoint mode
+        payload.target_high_f = desiredCoolF !== null ? desiredCoolF : ent.target_high_f;
+        payload.target_low_f  = desiredHeatF !== null ? desiredHeatF : ent.target_low_f;
+      } else {
+        // single setpoint — use whichever direction changed
+        payload.target_temp_f = (dialMode === 'cool') ? desiredCoolF : desiredHeatF;
       }
       $('setpoint-apply').disabled = true;
       $('setpoint-status').textContent = 'Sending…';
@@ -759,7 +1050,6 @@
     });
   }
   document.addEventListener('DOMContentLoaded', _initSetpointControlsOnce);
-  // Also call directly in case DOMContentLoaded already fired
   _initSetpointControlsOnce();
 
   function renderClimateNow(now, unit) {

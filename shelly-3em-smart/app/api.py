@@ -23,6 +23,8 @@ from .weather import (
     compute_rollup,
     get_today_forecast,
     latest_weather,
+    predict_upcoming_energy,
+    record_forecast_daily,
     record_gas_reading,
     record_setpoint_sample,
     record_weather_reading,
@@ -108,6 +110,13 @@ def get_history_summary():
 
 # ---------- weather / climate (v0.6.0) ----------
 
+class ForecastDayIn(BaseModel):
+    date_str: str            # YYYY-MM-DD local
+    forecast_high_f: Optional[float] = None
+    forecast_low_f: Optional[float] = None
+    condition: Optional[str] = None
+
+
 class WeatherReadingIn(BaseModel):
     temp_f: float
     humidity: Optional[float] = None
@@ -116,6 +125,7 @@ class WeatherReadingIn(BaseModel):
     ts: Optional[float] = None
     forecast_high_f: Optional[float] = None
     forecast_low_f: Optional[float] = None
+    forecast_days: Optional[list[ForecastDayIn]] = None     # next-week forecast
 
 
 @router.post("/api/weather_reading")
@@ -124,8 +134,10 @@ def post_weather_reading(body: WeatherReadingIn):
     weather entity. Temperature must be in Fahrenheit. forecast_high_f /
     forecast_low_f are best-effort — sent when the weather entity exposes
     a daily forecast, used by the dashboard's today H/L card so it has a
-    meaningful range before empirical min/max has built up."""
-    return record_weather_reading(
+    meaningful range before empirical min/max has built up. forecast_days
+    is the upcoming N-day daily forecast used by the energy prediction
+    card on the Insights tab."""
+    result = record_weather_reading(
         temp_f=body.temp_f,
         humidity=body.humidity,
         condition=body.condition,
@@ -134,6 +146,26 @@ def post_weather_reading(body: WeatherReadingIn):
         forecast_high_f=body.forecast_high_f,
         forecast_low_f=body.forecast_low_f,
     )
+    if body.forecast_days:
+        try:
+            written = record_forecast_daily([d.model_dump() for d in body.forecast_days])
+            result["forecast_days_written"] = written
+        except Exception:
+            log.exception("record_forecast_daily failed")
+    return result
+
+
+@router.get("/api/forecast/energy")
+def get_forecast_energy(days_ahead: int = 7):
+    """Predicted panel kWh + cost for tomorrow and the next N-1 days,
+    derived from the regression fit on history and the HA weather entity's
+    daily forecast. Used by the Energy forecast card on Insights."""
+    days_ahead = max(1, min(int(days_ahead), 14))
+    try:
+        return predict_upcoming_energy(days_ahead=days_ahead)
+    except sqlite3.OperationalError as e:
+        log.warning("predict_upcoming_energy: db unavailable: %s", e)
+        return {"days": [], "total_kwh": 0.0, "total_cost": 0.0, "has_forecast": False}
 
 
 class GasReadingIn(BaseModel):

@@ -142,6 +142,38 @@ def record_setpoint_sample(
     return {"ts": ts, "entity_id": entity_id}
 
 
+def record_forecast_daily(forecast_days: list[dict]) -> int:
+    """Bulk-replace upcoming-week forecast rows. Each entry must include
+    `date_str` (YYYY-MM-DD), `forecast_high_f`, `forecast_low_f`; optionally
+    `condition`. Returns the number of rows written."""
+    if not forecast_days:
+        return 0
+    now = time.time()
+    written = 0
+    with cursor() as cur:
+        for d in forecast_days:
+            ds = d.get("date_str")
+            high = d.get("forecast_high_f")
+            low = d.get("forecast_low_f")
+            if not ds or (high is None and low is None):
+                continue
+            avg = ((high or low) + (low or high)) / 2.0 if (high is not None or low is not None) else None
+            cur.execute(
+                """INSERT INTO weather_forecast_daily
+                   (date_str, forecast_high_f, forecast_low_f, forecast_avg_f, condition, refreshed_ts)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(date_str) DO UPDATE SET
+                     forecast_high_f = excluded.forecast_high_f,
+                     forecast_low_f  = excluded.forecast_low_f,
+                     forecast_avg_f  = excluded.forecast_avg_f,
+                     condition       = excluded.condition,
+                     refreshed_ts    = excluded.refreshed_ts""",
+                (ds, high, low, avg, d.get("condition"), now),
+            )
+            written += 1
+    return written
+
+
 def get_today_forecast() -> Optional[dict]:
     """Latest forecast H/L for today's local date (only useful while the
     stored date_str matches today's local date — otherwise it's stale)."""
@@ -726,29 +758,68 @@ def _project_delta(
     return {"delta_kwh_30d": total, "days_used": len(deltas_kwh)}
 
 
+# Rough fraction of panel kWh attributable to HVAC when no per-device data
+# exists yet. These are residential averages; the fitted regression replaces
+# them as soon as we have enough data to fit. Cooling-season ≈ when there's
+# any CDD; heating-season ≈ when there's any HDD.
+_HVAC_FRACTION_COOLING_SEASON = 0.40   # AC + blower as fraction of summer panel kWh
+_HVAC_FRACTION_HEATING_SEASON = 0.50   # electric resistance / heat-pump backup fraction
+
+
 def _project_rule_of_thumb(
     rollups: list[dict],
     target_col: str,
     delta_f: float,
     direction: str,
 ) -> dict:
-    """Fallback when we can't fit a real model. Use ~5%/°F applied to the
-    last 30 days of role-specific energy. For cooling, raising setpoint
-    (positive delta) SAVES energy; for heating, raising setpoint (positive
-    delta) USES MORE energy."""
-    recent_kwh = 0.0
-    n = 0
+    """Fallback when we can't fit a real model. ~5%/°F applied to the last
+    30 days of role-specific energy. For cooling, raising setpoint (positive
+    delta) SAVES energy; for heating, raising setpoint (positive delta)
+    USES MORE energy.
+
+    When the role column has no data yet (user hasn't tagged a cooling /
+    heating device), fall back to panel_wh × HVAC fraction so the user
+    still sees a meaningful estimate rather than $0.
+    """
+    role_kwh = 0.0
+    n_role = 0
+    panel_seasonal_kwh = 0.0
+    n_panel = 0
     for r in rollups:
         v = r.get(target_col)
-        if v is None or v <= 0:
-            continue
-        recent_kwh += v / 1000.0
-        n += 1
-    if n == 0:
-        return {"delta_kwh_30d": 0.0, "days_used": 0}
+        if v is not None and v > 0:
+            role_kwh += v / 1000.0
+            n_role += 1
+        T = r.get("avg_temp_f")
+        if T is not None:
+            in_cooling_season = (r.get("cdd") or 0) > 0
+            in_heating_season = (r.get("hdd") or 0) > 0
+            if direction == "cool" and in_cooling_season:
+                panel_seasonal_kwh += (r.get("panel_wh") or 0) / 1000.0
+                n_panel += 1
+            elif direction == "heat" and in_heating_season:
+                panel_seasonal_kwh += (r.get("panel_wh") or 0) / 1000.0
+                n_panel += 1
+
     pct_change = -(_RULE_OF_THUMB_PCT_PER_F / 100.0) * delta_f if direction == "cool" \
         else (_RULE_OF_THUMB_PCT_PER_F / 100.0) * delta_f
-    return {"delta_kwh_30d": recent_kwh * pct_change, "days_used": n}
+
+    # Prefer role-specific data when we have it
+    if n_role >= 5:
+        return {
+            "delta_kwh_30d": role_kwh * pct_change,
+            "days_used": n_role,
+            "basis": "role_energy",
+        }
+    # Fall back to panel_wh × HVAC fraction
+    if n_panel >= 5:
+        frac = _HVAC_FRACTION_COOLING_SEASON if direction == "cool" else _HVAC_FRACTION_HEATING_SEASON
+        return {
+            "delta_kwh_30d": panel_seasonal_kwh * frac * pct_change,
+            "days_used": n_panel,
+            "basis": f"panel_estimate_{int(frac*100)}pct",
+        }
+    return {"delta_kwh_30d": 0.0, "days_used": 0, "basis": "no_data"}
 
 
 def _current_setpoint(direction: str) -> Optional[float]:
@@ -775,6 +846,94 @@ def _current_setpoint(direction: str) -> Optional[float]:
     return sum(vals) / len(vals)
 
 
+def predict_upcoming_energy(days_ahead: int = 7) -> dict:
+    """Predict panel kWh for tomorrow + next N-1 days using the HDD/CDD
+    regression fit on the rolling 30-day history, against the forecast
+    high/low from the HA weather entity. Falls back to recent-average kWh
+    when the regression hasn't converged."""
+    today = date.today()
+    base = float(settings.hdd_cdd_base_temp_f)
+    rate_dollars_per_kwh = float(settings.electricity_rate_cents_per_kwh or 0.0) / 100.0
+
+    # Fit panel-wide regression on recent completed days
+    history = _completed_days(limit=30)
+    model = _fit_hdd_cdd(history, target="panel_wh")
+
+    # Pull forecast for the next N days
+    with cursor() as cur:
+        cur.execute(
+            "SELECT date_str, forecast_high_f, forecast_low_f, forecast_avg_f, condition "
+            "FROM weather_forecast_daily WHERE date_str >= ? ORDER BY date_str LIMIT ?",
+            ((today + timedelta(days=1)).isoformat(), days_ahead),
+        )
+        cols = ["date_str", "forecast_high_f", "forecast_low_f", "forecast_avg_f", "condition"]
+        fc_rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    # Recent kWh baseline as a fallback when no model
+    recent_kwh_per_day = None
+    if history:
+        recent_kwh = sum((r.get("panel_wh") or 0) / 1000.0 for r in history) / max(1, len(history))
+        recent_kwh_per_day = recent_kwh
+
+    predictions = []
+    for fc in fc_rows:
+        ds = fc["date_str"]
+        avg_f = fc.get("forecast_avg_f")
+        if avg_f is None:
+            high = fc.get("forecast_high_f")
+            low = fc.get("forecast_low_f")
+            if high is not None and low is not None:
+                avg_f = (high + low) / 2.0
+            elif high is not None:
+                avg_f = high
+            elif low is not None:
+                avg_f = low
+
+        hdd = max(0.0, base - avg_f) if avg_f is not None else None
+        cdd = max(0.0, avg_f - base) if avg_f is not None else None
+
+        if model is not None and hdd is not None and cdd is not None:
+            kwh = max(0.0,
+                model["hdd_coef_kwh_per_dd"] * hdd +
+                model["cdd_coef_kwh_per_dd"] * cdd +
+                model["baseline_kwh"]
+            )
+            source = "regression"
+        elif recent_kwh_per_day is not None:
+            kwh = recent_kwh_per_day
+            source = "recent_average"
+        else:
+            kwh = 0.0
+            source = "unknown"
+
+        predictions.append({
+            "date_str": ds,
+            "forecast_high_f": fc.get("forecast_high_f"),
+            "forecast_low_f": fc.get("forecast_low_f"),
+            "forecast_avg_f": avg_f,
+            "hdd": hdd,
+            "cdd": cdd,
+            "condition": fc.get("condition"),
+            "predicted_kwh": kwh,
+            "predicted_cost": kwh * rate_dollars_per_kwh,
+            "source": source,
+        })
+
+    total_kwh = sum(p["predicted_kwh"] for p in predictions)
+    return {
+        "days": predictions,
+        "total_kwh": total_kwh,
+        "total_cost": total_kwh * rate_dollars_per_kwh,
+        "model_r_squared": (model or {}).get("r_squared") if model else None,
+        "model_n": (model or {}).get("n") if model else None,
+        "has_forecast": len(predictions) > 0,
+        "base_temp_f": base,
+        "rate_cents_per_kwh": settings.electricity_rate_cents_per_kwh,
+        "currency_symbol": settings.currency_symbol,
+        "temp_unit": settings.temp_unit,
+    }
+
+
 def setpoint_savings(deltas_f: Optional[list[float]] = None) -> dict:
     """For each direction (cooling, heating), compute the projected monthly
     energy and cost change for setpoint adjustments in `deltas_f` (degrees F,
@@ -792,22 +951,21 @@ def setpoint_savings(deltas_f: Optional[list[float]] = None) -> dict:
 
     def _build(direction: str, target_col: str, setpoint_col: str, current_f: Optional[float]) -> dict:
         model = _fit_setpoint_dd(history, target_col, setpoint_col, direction)
+        # Even without a current setpoint reading we still compute scenarios
+        # against a default baseline so the user gets a ballpark number.
+        used_default_setpoint = False
         if current_f is None:
-            # Without a current setpoint we can't simulate ΔS
-            return {
-                "has_model": False,
-                "current_setpoint_f": None,
-                "method": "no_setpoint_data",
-                "needs": "no recent setpoint readings — wire up a climate entity in the HACS integration",
-                "scenarios": [],
-            }
+            current_f = 72.0 if direction == "cool" else 68.0   # common US defaults
+            used_default_setpoint = True
         scenarios = []
         used_method = "fitted_regression" if model else "rule_of_thumb_5pct"
         for d in deltas_f:
             if model:
                 proj = _project_delta(history, current_f, d, model["kwh_per_dd"], direction)
+                basis = "fitted"
             else:
                 proj = _project_rule_of_thumb(history, target_col, d, direction)
+                basis = proj.get("basis", "rule_of_thumb")
             dkwh = proj["delta_kwh_30d"]
             dcost = dkwh * rate_dollars_per_kwh
             scenarios.append({
@@ -815,11 +973,14 @@ def setpoint_savings(deltas_f: Optional[list[float]] = None) -> dict:
                 "monthly_kwh_delta": dkwh,
                 "monthly_cost_delta": dcost,
                 "days_used": proj["days_used"],
+                "basis": basis,
             })
         return {
             "has_model": model is not None,
             "current_setpoint_f": current_f,
+            "used_default_setpoint": used_default_setpoint,
             "method": used_method,
+            "basis": (scenarios[0].get("basis") if scenarios else None) if not model else "fitted",
             "kwh_per_dd": model["kwh_per_dd"] if model else None,
             "r_squared": model["r_squared"] if model else None,
             "n": model["n"] if model else None,
