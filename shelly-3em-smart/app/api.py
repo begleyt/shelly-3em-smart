@@ -26,7 +26,16 @@ from .weather import (
     record_gas_reading,
     record_setpoint_sample,
     record_weather_reading,
+    setpoint_savings,
     weather_anomaly,
+)
+from .ha_service import (
+    COOL_MAX_F,
+    COOL_MIN_F,
+    HEAT_MAX_F,
+    HEAT_MIN_F,
+    have_ha_api,
+    set_climate_temperature,
 )
 
 router = APIRouter()
@@ -258,6 +267,109 @@ def rebuild_rollups(days: int = 31):
     rows reflect the new config."""
     rebuilt = backfill_recent_rollups(days=max(1, min(days, 400)))
     return {"rebuilt": rebuilt}
+
+
+@router.get("/api/setpoint/savings")
+def get_setpoint_savings(deltas: Optional[str] = None):
+    """Projected monthly kWh + cost change for setpoint deltas.
+    `deltas` is a comma-separated list of floats (in °F); default `-2,-1,1,2`.
+    Returns separate blocks for cooling and heating. If we have ≥14 days of
+    role-specific energy data with ≥1.5°F of setpoint variance, uses a
+    setpoint-adjusted CDD/HDD regression; otherwise falls back to the
+    industry rule of thumb (~5%/°F) with a `needs` field explaining the
+    gap to a fitted model."""
+    parsed: Optional[list[float]] = None
+    if deltas:
+        try:
+            parsed = [float(x) for x in deltas.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="deltas must be comma-separated floats")
+    try:
+        return setpoint_savings(parsed)
+    except sqlite3.OperationalError as e:
+        log.warning("setpoint_savings: db unavailable: %s", e)
+        return {"cooling": {"has_model": False}, "heating": {"has_model": False}}
+
+
+class SetpointSetIn(BaseModel):
+    entity_id: str
+    hvac_mode: Optional[str] = None
+    target_temp_f: Optional[float] = None
+    target_low_f: Optional[float] = None    # heat setpoint (heat_cool mode)
+    target_high_f: Optional[float] = None   # cool setpoint (heat_cool mode)
+    ha_temp_unit: str = "F"                 # what unit HA wants
+
+
+@router.post("/api/setpoint/set")
+async def post_setpoint_set(body: SetpointSetIn):
+    """Forward a setpoint change to HA via the supervisor proxy. Requires
+    homeassistant_api: true in config.yaml (set in 0.8.0) — the supervisor
+    will prompt the user to grant the permission on first upgrade. Returns
+    `{"ok": false, "needs_api": true}` if the env var isn't there yet."""
+    if not have_ha_api():
+        return {
+            "ok": False,
+            "needs_api": True,
+            "message": "Supervisor token missing. Grant the 'Home Assistant API' permission on the add-on and restart.",
+        }
+    try:
+        return await set_climate_temperature(
+            entity_id=body.entity_id,
+            hvac_mode=body.hvac_mode,
+            target_temp_f=body.target_temp_f,
+            target_low_f=body.target_low_f,
+            target_high_f=body.target_high_f,
+            ha_temp_unit=body.ha_temp_unit,
+        )
+    except ValueError as e:
+        # Bounds / payload validation failures should land at the UI as 400
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.exception("set_climate_temperature failed")
+        raise HTTPException(status_code=502, detail=f"HA service call failed: {e}")
+
+
+@router.get("/api/setpoint/bounds")
+def get_setpoint_bounds():
+    """Safe bounds the dashboard should enforce on its sliders."""
+    return {
+        "cool_min_f": COOL_MIN_F, "cool_max_f": COOL_MAX_F,
+        "heat_min_f": HEAT_MIN_F, "heat_max_f": HEAT_MAX_F,
+        "ha_api_available": have_ha_api(),
+    }
+
+
+@router.get("/api/setpoint/entities")
+def get_setpoint_entities():
+    """All climate entities we've seen samples from, with their most recent
+    snapshot. Used by the dashboard to populate the control dropdown."""
+    with cursor() as cur:
+        cur.execute(
+            """SELECT entity_id, MAX(ts) FROM setpoint_samples GROUP BY entity_id"""
+        )
+        latest_per_entity = {row[0]: row[1] for row in cur.fetchall()}
+        results = []
+        for entity_id, max_ts in latest_per_entity.items():
+            cur.execute(
+                """SELECT target_temp_f, target_low_f, target_high_f,
+                          current_temp_f, hvac_mode, hvac_action
+                   FROM setpoint_samples WHERE entity_id = ? AND ts = ?""",
+                (entity_id, max_ts),
+            )
+            row = cur.fetchone()
+            if row is None:
+                continue
+            results.append({
+                "entity_id": entity_id,
+                "ts": max_ts,
+                "target_temp_f": row[0],
+                "target_low_f": row[1],
+                "target_high_f": row[2],
+                "current_temp_f": row[3],
+                "hvac_mode": row[4],
+                "hvac_action": row[5],
+            })
+    return {"entities": sorted(results, key=lambda r: r["entity_id"])}
 
 
 @router.get("/api/devices/{device_id}/stats")
