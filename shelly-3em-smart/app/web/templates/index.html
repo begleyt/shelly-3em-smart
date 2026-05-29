@@ -177,34 +177,22 @@
       </div>
     </div>
 
-    <!-- Anomaly callout -->
+    <!-- Panel-wide anomaly callout -->
     <div class="card" id="climate-anomaly" style="display:none;">
-      <div class="card-label">Today vs weather-predicted baseline</div>
+      <div class="card-label">Whole-panel today vs weather-predicted baseline</div>
       <div class="anomaly-grid">
-        <div>
-          <div class="muted">Predicted so far</div>
-          <div class="anomaly-value" id="anomaly-predicted">—</div>
-        </div>
-        <div>
-          <div class="muted">Actual so far</div>
-          <div class="anomaly-value" id="anomaly-actual">—</div>
-        </div>
-        <div>
-          <div class="muted">Delta</div>
-          <div class="anomaly-value" id="anomaly-delta">—</div>
-        </div>
-        <div>
-          <div class="muted">Model fit (R²)</div>
-          <div class="anomaly-value" id="anomaly-r2">—</div>
-        </div>
+        <div><div class="muted">Predicted so far</div><div class="anomaly-value" id="anomaly-predicted">—</div></div>
+        <div><div class="muted">Actual so far</div><div class="anomaly-value" id="anomaly-actual">—</div></div>
+        <div><div class="muted">Delta</div><div class="anomaly-value" id="anomaly-delta">—</div></div>
+        <div><div class="muted">Model fit (R²)</div><div class="anomaly-value" id="anomaly-r2">—</div></div>
       </div>
       <p class="muted" style="font-size:0.85rem;margin-top:8px;" id="anomaly-explain">—</p>
     </div>
 
-    <!-- Charts: scatter (kWh vs temp) + bar (HDD/CDD per day) -->
+    <!-- HDD / CDD bars + panel scatter -->
     <div class="two-col">
       <div class="card">
-        <div class="card-label">Daily kWh vs outside avg temp <span class="muted" style="font-weight:400;font-size:0.8rem;">— last 30 days</span></div>
+        <div class="card-label">Daily panel kWh vs outside avg temp <span class="muted" style="font-weight:400;font-size:0.8rem;">— last 30 days</span></div>
         <div style="position:relative;height:280px;margin-top:8px;">
           <canvas id="climate-scatter"></canvas>
         </div>
@@ -217,15 +205,56 @@
       </div>
     </div>
 
-    <!-- HVAC device callout if tagged -->
-    <div class="card" id="climate-hvac-card" style="display:none;">
-      <div class="card-label">HVAC-only correlation <span class="muted" style="font-weight:400;font-size:0.8rem;">— device tagged: <span id="climate-hvac-name">—</span></span></div>
-      <div style="position:relative;height:240px;margin-top:8px;">
-        <canvas id="climate-hvac-scatter"></canvas>
+    <!-- Cooling section (visible when a device is tagged hvac_role='cooling') -->
+    <div class="card" id="climate-cooling-card" style="display:none;border-left:4px solid #4ea1d3;">
+      <div class="card-label">Cooling — <span id="climate-cooling-name" style="color:var(--fg-1);">—</span></div>
+      <div class="climate-section-grid">
+        <div>
+          <div class="muted">Today so far</div>
+          <div class="anomaly-value" id="cooling-today">—</div>
+          <div class="muted" id="cooling-setpoint">—</div>
+        </div>
+        <div>
+          <div class="muted">vs predicted (today)</div>
+          <div class="anomaly-value" id="cooling-delta">—</div>
+          <div class="muted" id="cooling-r2">—</div>
+        </div>
+      </div>
+      <div style="position:relative;height:260px;margin-top:12px;">
+        <canvas id="climate-cooling-scatter"></canvas>
+      </div>
+      <p class="muted" style="font-size:0.85rem;margin-top:8px;">Each point colored by avg cooling setpoint that day. Lower setpoint = more cooling work per CDD.</p>
+    </div>
+
+    <!-- Heating section (visible if either an electric heating device or gas data exists) -->
+    <div class="card" id="climate-heating-card" style="display:none;border-left:4px solid #e15759;">
+      <div class="card-label">Heating — <span id="climate-heating-name" style="color:var(--fg-1);">—</span></div>
+      <div class="climate-section-grid">
+        <div>
+          <div class="muted">Today so far</div>
+          <div class="anomaly-value" id="heating-today">—</div>
+          <div class="muted" id="heating-setpoint">—</div>
+        </div>
+        <div>
+          <div class="muted">vs predicted (today)</div>
+          <div class="anomaly-value" id="heating-delta">—</div>
+          <div class="muted" id="heating-r2">—</div>
+        </div>
+      </div>
+      <div style="position:relative;height:260px;margin-top:12px;">
+        <canvas id="climate-heating-scatter"></canvas>
       </div>
       <p class="muted" style="font-size:0.85rem;margin-top:8px;">
-        Tag a different device as HVAC in the Devices tab to swap.
+        Points colored by avg heating setpoint that day. <span id="heating-units-note"></span>
       </p>
+    </div>
+
+    <!-- Setpoint timeline overlay (visible when climate entity configured) -->
+    <div class="card" id="climate-setpoint-card" style="display:none;">
+      <div class="card-label">Setpoint trends <span class="muted" style="font-weight:400;font-size:0.8rem;">— last 30 days</span></div>
+      <div style="position:relative;height:240px;margin-top:8px;">
+        <canvas id="climate-setpoint-chart"></canvas>
+      </div>
     </div>
   </section>
 
@@ -369,11 +398,15 @@
       <span style="color:var(--fg);">Continuous load (don't toggle via event matching)</span>
     </label>
     <p class="muted" style="font-size:0.75rem;margin-top:4px;">For continuous devices the state is controlled by you via the buttons below, not by step events.</p>
-    <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer;">
-      <input id="edit-hvac" type="checkbox" style="width:auto;margin:0;" />
-      <span style="color:var(--fg);">This is the HVAC device (correlate against outside temperature)</span>
+    <label style="display:block;margin-top:12px;">
+      <span style="color:var(--fg);">HVAC role</span>
+      <select id="edit-hvac-role" style="margin-top:4px;">
+        <option value="">— not HVAC —</option>
+        <option value="cooling">Cooling (correlate vs CDD)</option>
+        <option value="heating">Heating (correlate vs HDD)</option>
+      </select>
     </label>
-    <p class="muted" style="font-size:0.75rem;margin-top:4px;">Only one device can be tagged as HVAC. The Climate tab uses it for the HVAC-only scatter plot. Setting this here will clear it on any other device.</p>
+    <p class="muted" style="font-size:0.75rem;margin-top:4px;">Only one device per role at a time. The Climate tab uses these for per-role scatter plots and the regression anomaly model. Selecting a role here clears it on any other device with the same role.</p>
     <div class="actions" style="margin-top:12px;">
       <button id="edit-force-on">Mark On</button>
       <button id="edit-force-off">Mark Off</button>

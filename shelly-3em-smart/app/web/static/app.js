@@ -457,7 +457,6 @@
   // --- Climate / weather tab ---
   let climateScatterChart = null;
   let climateDegreeBarsChart = null;
-  let climateHvacScatterChart = null;
 
   function fmtTemp(f, unitPref) {
     if (f === null || f === undefined) return '—';
@@ -502,7 +501,9 @@
       renderClimateAnomaly(anom);
       renderClimateScatter(roll.days || [], unit);
       renderClimateDegreeBars(roll.days || [], unit);
-      renderClimateHvac(roll.days || [], devs, unit);
+      renderCoolingSection(now, anom, roll.days || [], devs, unit);
+      renderHeatingSection(now, anom, roll.days || [], devs, unit);
+      renderSetpointTimeline(roll.days || [], unit);
     } catch (e) {
       console.warn('climate fetch failed', e);
     }
@@ -526,9 +527,28 @@
     if (now.humidity !== null && now.humidity !== undefined) parts.push(`${Math.round(now.humidity)}% RH`);
     $('climate-now-meta').textContent = parts.join(' · ') || '—';
 
-    $('climate-hilo').textContent =
-      `${fmtTemp(now.today_max_f, unit)} / ${fmtTemp(now.today_min_f, unit)}`;
-    $('climate-avg').textContent = `avg ${fmtTemp(now.today_avg_f, unit)}`;
+    // H/L: prefer forecast (meaningful early in the day), fall back to
+    // empirical min/max. If they're equal-ish, it's because we only have one
+    // sample — show a hint so the UI isn't confusing.
+    let highF = (now.today_forecast_high_f !== null && now.today_forecast_high_f !== undefined)
+      ? now.today_forecast_high_f : now.today_max_f;
+    let lowF = (now.today_forecast_low_f !== null && now.today_forecast_low_f !== undefined)
+      ? now.today_forecast_low_f : now.today_min_f;
+    const sameVal = (highF !== null && lowF !== null && Math.abs(highF - lowF) < 0.5 &&
+                     now.temp_f !== null && Math.abs(now.temp_f - highF) < 0.5);
+    if (sameVal) {
+      // Not enough variation to be meaningful yet
+      $('climate-hilo').textContent = `${fmtTemp(now.temp_f, unit)}`;
+      $('climate-avg').textContent = 'still collecting today\'s range';
+    } else {
+      $('climate-hilo').textContent =
+        `${fmtTemp(highF, unit)} / ${fmtTemp(lowF, unit)}`;
+      const source = (now.today_forecast_high_f !== null && now.today_forecast_high_f !== undefined)
+        ? 'forecast' : 'observed';
+      $('climate-avg').textContent = now.today_avg_f !== null
+        ? `avg ${fmtTemp(now.today_avg_f, unit)} · ${source}`
+        : source;
+    }
 
     $('climate-hdd').textContent = fmtDD(now.today_hdd);
     $('climate-cdd').textContent = fmtDD(now.today_cdd);
@@ -541,39 +561,225 @@
 
   function renderClimateAnomaly(anom) {
     const banner = $('climate-anomaly');
-    if (!anom || !anom.model || anom.verdict === 'insufficient_baseline' || anom.verdict === 'unavailable') {
+    const panel = anom && anom.panel;
+    if (!panel || !panel.model || panel.verdict === 'insufficient_baseline' || panel.verdict === 'unavailable') {
       banner.style.display = 'none';
       return;
     }
     banner.style.display = '';
     banner.classList.remove('above', 'below', 'normal');
-    if (anom.verdict === 'above_baseline') banner.classList.add('above');
-    else if (anom.verdict === 'below_baseline') banner.classList.add('below');
+    if (panel.verdict === 'above_baseline') banner.classList.add('above');
+    else if (panel.verdict === 'below_baseline') banner.classList.add('below');
     else banner.classList.add('normal');
 
-    $('anomaly-predicted').textContent = anom.predicted_kwh_so_far !== undefined
-      ? `${anom.predicted_kwh_so_far.toFixed(2)} kWh` : '—';
-    $('anomaly-actual').textContent = `${anom.today_actual_kwh.toFixed(2)} kWh`;
-    if (anom.delta_pct !== null && anom.delta_pct !== undefined) {
-      const sign = anom.delta_pct >= 0 ? '+' : '';
-      $('anomaly-delta').textContent = `${sign}${anom.delta_pct.toFixed(0)}% (${anom.delta_kwh.toFixed(2)} kWh)`;
+    $('anomaly-predicted').textContent = panel.predicted_kwh_so_far !== undefined
+      ? `${panel.predicted_kwh_so_far.toFixed(2)} kWh` : '—';
+    $('anomaly-actual').textContent = `${(panel.today_actual_kwh || 0).toFixed(2)} kWh`;
+    if (panel.delta_pct !== null && panel.delta_pct !== undefined) {
+      const sign = panel.delta_pct >= 0 ? '+' : '';
+      $('anomaly-delta').textContent = `${sign}${panel.delta_pct.toFixed(0)}% (${panel.delta_kwh.toFixed(2)} kWh)`;
     } else {
       $('anomaly-delta').textContent = '—';
     }
-    $('anomaly-r2').textContent = anom.model.r_squared !== undefined
-      ? anom.model.r_squared.toFixed(2) : '—';
+    $('anomaly-r2').textContent = panel.model.r_squared !== undefined
+      ? panel.model.r_squared.toFixed(2) : '—';
 
     const explain = [];
-    if (anom.verdict === 'above_baseline') {
+    if (panel.verdict === 'above_baseline') {
       explain.push('Today is running well above what the temperature would predict.');
       explain.push('Could be a new device running, a stuck appliance, or a guest cycle.');
-    } else if (anom.verdict === 'below_baseline') {
+    } else if (panel.verdict === 'below_baseline') {
       explain.push('Today is running well below the temperature-predicted baseline.');
     } else {
       explain.push('Today\'s usage matches what the temperature predicts.');
     }
     explain.push(`Model fit on last ${anom.history_days} completed days.`);
     $('anomaly-explain').textContent = explain.join(' ');
+  }
+
+  function _setpointColorFor(setpointF, unit, lo, hi) {
+    // Map setpoint into the lo..hi range, return a viridis-ish hex code.
+    if (setpointF === null || setpointF === undefined) return '#7c8896';
+    const t = Math.max(0, Math.min(1, (setpointF - lo) / Math.max(1, (hi - lo))));
+    // Cool: blue (low setpoint = more cooling) -> orange (high setpoint = less cooling)
+    const r = Math.round(40  + t * (240 - 40));
+    const g = Math.round(120 + t * (140 - 120));
+    const b = Math.round(220 - t * (220 - 60));
+    return `rgb(${r},${g},${b})`;
+  }
+
+  function _verdictRow(label, anomSection, kwhSuffix) {
+    if (!anomSection || anomSection.delta_pct === undefined || anomSection.delta_pct === null) {
+      return ['—', '—'];
+    }
+    const sign = anomSection.delta_pct >= 0 ? '+' : '';
+    return [
+      `${sign}${anomSection.delta_pct.toFixed(0)}% (${(anomSection.delta_kwh||0).toFixed(2)} ${kwhSuffix || 'kWh'})`,
+      anomSection.model && anomSection.model.r_squared !== undefined
+        ? `R² ${anomSection.model.r_squared.toFixed(2)}, n=${anomSection.model.n}` : '—',
+    ];
+  }
+
+  function renderCoolingSection(now, anom, days, devs, unit) {
+    const cooling = (devs || []).find(d => d.hvac_role === 'cooling') ||
+                    (devs || []).find(d => d.is_hvac);   // legacy fallback
+    const card = $('climate-cooling-card');
+    if (!cooling) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    $('climate-cooling-name').textContent = cooling.name;
+    const todayKwh = now ? (now.today_cooling_kwh || 0) : 0;
+    $('cooling-today').textContent = `${todayKwh.toFixed(2)} kWh`;
+    const sp = now && now.today_avg_cool_setpoint_f;
+    $('cooling-setpoint').textContent = sp != null
+      ? `avg setpoint ${fmtTemp(sp, unit)}`
+      : 'no setpoint data yet';
+    const [deltaTxt, fitTxt] = _verdictRow('Cooling', anom && anom.cooling, 'kWh');
+    $('cooling-delta').textContent = deltaTxt;
+    $('cooling-r2').textContent = fitTxt;
+
+    // Scatter: cooling_wh / day vs avg temp, points colored by avg cool setpoint
+    const points = days
+      .filter(d => d.avg_temp_f !== null && d.cooling_wh && d.cooling_wh > 0)
+      .map(d => ({
+        x: unit === 'C' ? ((d.avg_temp_f - 32) * 5/9) : d.avg_temp_f,
+        y: d.cooling_wh / 1000.0,
+        date: d.date_str,
+        setF: d.avg_cool_setpoint_f,
+        bg: _setpointColorFor(d.avg_cool_setpoint_f, unit, 65, 80),
+      }));
+    if (climateCoolingScatterChart) climateCoolingScatterChart.destroy();
+    climateCoolingScatterChart = new Chart($('climate-cooling-scatter'), {
+      type: 'scatter',
+      data: { datasets: [{
+        label: 'Cooling kWh / day',
+        data: points,
+        backgroundColor: points.map(p => p.bg),
+        pointRadius: 5,
+      }]},
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: {
+            label: ctx => {
+              const p = ctx.raw;
+              const sp = p.setF != null ? ` · setpoint ${fmtTemp(p.setF, unit)}` : '';
+              return `${p.date}: ${p.y.toFixed(2)} kWh @ ${p.x.toFixed(1)}°${unit}${sp}`;
+            },
+          }},
+        },
+        scales: {
+          x: { title: { display: true, text: `Daily avg outside temp (°${unit})`, color: '#8a93a6' }, ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' } },
+          y: { title: { display: true, text: 'Cooling kWh', color: '#8a93a6' }, ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' }, beginAtZero: true },
+        },
+      },
+    });
+  }
+
+  function renderHeatingSection(now, anom, days, devs, unit) {
+    const heating = (devs || []).find(d => d.hvac_role === 'heating');
+    const hasGas = days.some(d => d.heating_therms && d.heating_therms > 0) ||
+                   (now && now.today_heating_therms && now.today_heating_therms > 0);
+    const card = $('climate-heating-card');
+    if (!heating && !hasGas) { card.style.display = 'none'; return; }
+    card.style.display = '';
+
+    const useGas = hasGas && !heating;     // gas-only display when no electric heating device
+    $('climate-heating-name').textContent = heating ? heating.name : 'natural-gas heating';
+    $('heating-units-note').textContent = useGas
+      ? 'Heating shown in therms — convert to your unit via the add-on options.'
+      : 'Heating shown in kWh.';
+
+    if (useGas) {
+      const therms = now ? (now.today_heating_therms || 0) : 0;
+      $('heating-today').textContent = `${therms.toFixed(2)} therms`;
+    } else {
+      const todayKwh = now ? (now.today_heating_kwh || 0) : 0;
+      $('heating-today').textContent = `${todayKwh.toFixed(2)} kWh`;
+    }
+    const sp = now && now.today_avg_heat_setpoint_f;
+    $('heating-setpoint').textContent = sp != null
+      ? `avg setpoint ${fmtTemp(sp, unit)}`
+      : 'no setpoint data yet';
+    const [deltaTxt, fitTxt] = _verdictRow('Heating', anom && anom.heating, useGas ? 'therms' : 'kWh');
+    $('heating-delta').textContent = deltaTxt;
+    $('heating-r2').textContent = fitTxt;
+
+    // Scatter: heating_wh or therms / day vs avg temp
+    const points = days
+      .filter(d => d.avg_temp_f !== null && ((useGas && d.heating_therms > 0) || (!useGas && d.heating_wh && d.heating_wh > 0)))
+      .map(d => ({
+        x: unit === 'C' ? ((d.avg_temp_f - 32) * 5/9) : d.avg_temp_f,
+        y: useGas ? d.heating_therms : (d.heating_wh / 1000.0),
+        date: d.date_str,
+        setF: d.avg_heat_setpoint_f,
+        bg: _setpointColorFor(d.avg_heat_setpoint_f, unit, 60, 75),
+      }));
+    if (climateHeatingScatterChart) climateHeatingScatterChart.destroy();
+    climateHeatingScatterChart = new Chart($('climate-heating-scatter'), {
+      type: 'scatter',
+      data: { datasets: [{
+        label: useGas ? 'Heating therms / day' : 'Heating kWh / day',
+        data: points,
+        backgroundColor: points.map(p => p.bg),
+        pointRadius: 5,
+      }]},
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: {
+            label: ctx => {
+              const p = ctx.raw;
+              const sp = p.setF != null ? ` · setpoint ${fmtTemp(p.setF, unit)}` : '';
+              return `${p.date}: ${p.y.toFixed(2)} ${useGas ? 'therms' : 'kWh'} @ ${p.x.toFixed(1)}°${unit}${sp}`;
+            },
+          }},
+        },
+        scales: {
+          x: { title: { display: true, text: `Daily avg outside temp (°${unit})`, color: '#8a93a6' }, ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' } },
+          y: { title: { display: true, text: useGas ? 'therms' : 'kWh', color: '#8a93a6' }, ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' }, beginAtZero: true },
+        },
+      },
+    });
+  }
+
+  let climateCoolingScatterChart = null;
+  let climateHeatingScatterChart = null;
+  let climateSetpointChart = null;
+
+  function renderSetpointTimeline(days, unit) {
+    const card = $('climate-setpoint-card');
+    const hasAny = days.some(d => d.avg_cool_setpoint_f !== null || d.avg_heat_setpoint_f !== null);
+    if (!hasAny) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    const labels = days.map(d => d.date_str.slice(5));
+    const cool = days.map(d => d.avg_cool_setpoint_f !== null && d.avg_cool_setpoint_f !== undefined
+      ? (unit === 'C' ? (d.avg_cool_setpoint_f - 32) * 5/9 : d.avg_cool_setpoint_f) : null);
+    const heat = days.map(d => d.avg_heat_setpoint_f !== null && d.avg_heat_setpoint_f !== undefined
+      ? (unit === 'C' ? (d.avg_heat_setpoint_f - 32) * 5/9 : d.avg_heat_setpoint_f) : null);
+    const outside = days.map(d => d.avg_temp_f !== null && d.avg_temp_f !== undefined
+      ? (unit === 'C' ? (d.avg_temp_f - 32) * 5/9 : d.avg_temp_f) : null);
+    if (climateSetpointChart) climateSetpointChart.destroy();
+    climateSetpointChart = new Chart($('climate-setpoint-chart'), {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Outside avg', data: outside, borderColor: '#8a93a6', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderDash: [4,4] },
+          { label: 'Cool setpoint', data: cool, borderColor: '#4ea1d3', backgroundColor: '#4ea1d320', tension: 0.3, pointRadius: 2 },
+          { label: 'Heat setpoint', data: heat, borderColor: '#e15759', backgroundColor: '#e1575920', tension: 0.3, pointRadius: 2 },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#e6e9ef' }}},
+        scales: {
+          x: { ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' } },
+          y: { title: { display: true, text: `Temperature (°${unit})`, color: '#8a93a6' }, ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' } },
+        },
+      },
+    });
   }
 
   function renderClimateScatter(days, unit) {
@@ -641,49 +847,8 @@
     });
   }
 
-  function renderClimateHvac(days, devices, unit) {
-    const hvac = (devices || []).find(d => d.is_hvac);
-    const card = $('climate-hvac-card');
-    if (!hvac) {
-      card.style.display = 'none';
-      return;
-    }
-    card.style.display = '';
-    $('climate-hvac-name').textContent = hvac.name;
-    const canvas = $('climate-hvac-scatter');
-    if (!canvas) return;
-    const points = days
-      .filter(d => d.avg_temp_f !== null && d.hvac_wh !== null && d.hvac_wh > 0)
-      .map(d => ({
-        x: unit === 'C' ? ((d.avg_temp_f - 32) * 5/9) : d.avg_temp_f,
-        y: d.hvac_wh / 1000.0,
-        date: d.date_str,
-      }));
-    if (climateHvacScatterChart) climateHvacScatterChart.destroy();
-    climateHvacScatterChart = new Chart(canvas, {
-      type: 'scatter',
-      data: { datasets: [{
-        label: `${hvac.name} kWh / day`,
-        data: points,
-        backgroundColor: '#e15759',
-        pointRadius: 5,
-      }]},
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          legend: { display: false },
-          tooltip: { callbacks: {
-            label: ctx => `${ctx.raw.date}: ${ctx.raw.y.toFixed(2)} kWh @ ${ctx.raw.x.toFixed(1)}°${unit}`,
-          }},
-        },
-        scales: {
-          x: { title: { display: true, text: `Daily avg outside temp (°${unit})`, color: '#8a93a6' }, ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' } },
-          y: { title: { display: true, text: 'kWh', color: '#8a93a6' }, ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' }, beginAtZero: true },
-        },
-      },
-    });
-  }
+  // (legacy renderClimateHvac removed — superseded by renderCoolingSection /
+  // renderHeatingSection which split by hvac_role and include setpoint coloring)
 
   let energyDonutChart = null;
   let lastInsights = null;
@@ -1112,7 +1277,7 @@
     $('edit-name').value = d.name || '';
     $('edit-notes').value = d.notes || '';
     $('edit-continuous').checked = !!d.is_continuous;
-    $('edit-hvac').checked = !!d.is_hvac;
+    $('edit-hvac-role').value = d.hvac_role || (d.is_hvac ? 'cooling' : '');
     $('modal-edit').classList.remove('hidden');
     $('edit-name').focus();
   }
@@ -1123,7 +1288,7 @@
       name: $('edit-name').value.trim() || null,
       notes: $('edit-notes').value.trim() || null,
       is_continuous: $('edit-continuous').checked,
-      is_hvac: $('edit-hvac').checked,
+      hvac_role: $('edit-hvac-role').value,
     };
     const r = await fetch(API + '/devices/' + editingDeviceId, {
       method: 'PATCH',

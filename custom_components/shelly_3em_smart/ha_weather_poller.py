@@ -60,6 +60,32 @@ def _read_temp_f(state, hass: HomeAssistant) -> Optional[float]:
         return None
 
 
+def _read_today_forecast(state, hass: HomeAssistant) -> tuple[Optional[float], Optional[float]]:
+    """Best-effort: pull today's high/low from the weather.* entity's
+    `forecast` attribute. Modern HA weather entities deprecate this in favor
+    of weather.get_forecasts, but most providers still expose it; we just
+    skip silently if it's not there. Returns (high_f, low_f)."""
+    forecast = state.attributes.get("forecast") or []
+    if not forecast:
+        return (None, None)
+    # First entry is usually today's daily forecast
+    first = forecast[0] if isinstance(forecast, list) else None
+    if not isinstance(first, dict):
+        return (None, None)
+
+    unit = state.attributes.get("temperature_unit") or "C"
+    try:
+        unit = hass.config.units.temperature_unit
+    except Exception:
+        pass
+
+    high = first.get("temperature")    # 'temperature' is HA's daily high convention
+    low = first.get("templow")
+    high_f = _to_fahrenheit(float(high), unit) if isinstance(high, (int, float)) else None
+    low_f = _to_fahrenheit(float(low), unit) if isinstance(low, (int, float)) else None
+    return (high_f, low_f)
+
+
 def setup_weather_poller(
     hass: HomeAssistant,
     client: ShellyAddonClient,
@@ -86,6 +112,12 @@ def setup_weather_poller(
             return
         humidity = state.attributes.get("humidity")
         condition = state.state if state.entity_id.startswith("weather.") else None
+        high_f, low_f = (None, None)
+        if state.entity_id.startswith("weather."):
+            try:
+                high_f, low_f = _read_today_forecast(state, hass)
+            except Exception:
+                pass
         hass.async_create_task(
             client.post_weather_reading(
                 temp_f=temp_f,
@@ -93,6 +125,8 @@ def setup_weather_poller(
                 condition=condition,
                 source=f"ha_entity:{entity_id}",
                 ts=None,
+                forecast_high_f=high_f,
+                forecast_low_f=low_f,
             )
         )
 

@@ -1,5 +1,5 @@
 name: Shelly 3EM Smart Monitor
-version: "0.6.0"
+version: "0.7.0"
 slug: shelly_3em_smart
 description: >-
   Streams data from a Shelly Pro 3EM, auto-detects appliances from their
@@ -52,6 +52,8 @@ options:
   hdd_cdd_base_temp_f: 65.0
   temp_unit: F
   weather_retention_days: 400
+  gas_rate_dollars_per_therm: 0.0
+  heating_fuel_kind: natural_gas
   log_level: info
 schema:
   shelly_host: str
@@ -78,5 +80,7 @@ schema:
   hdd_cdd_base_temp_f: float(30,90)
   temp_unit: list(F|C)
   weather_retention_days: int(30,3650)
+  gas_rate_dollars_per_therm: float(0,20)
+  heating_fuel_kind: list(natural_gas|propane|oil|electric|heat_pump|none)
   log_level: list(trace|debug|info|notice|warning|error|fatal)
 image: ghcr.io/begleyt/shelly-3em-smart-{arch}

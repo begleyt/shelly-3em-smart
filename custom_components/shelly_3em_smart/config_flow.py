@@ -11,7 +11,9 @@ from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    CONF_CLIMATE_ENTITIES,
     CONF_ENERGY_ENTITIES,
+    CONF_GAS_ENTITY,
     CONF_HOST,
     CONF_PORT,
     CONF_TRACKED_ENTITIES,
@@ -50,6 +52,28 @@ def _weather_entity_selector():
         selector.EntitySelectorConfig(
             multiple=False,
             domain=["weather", "sensor"],
+        )
+    )
+
+
+def _gas_entity_selector():
+    """A cumulative gas meter sensor — typically a sensor.* with
+    device_class=gas or unit therms/ft³/m³."""
+    return selector.EntitySelector(
+        selector.EntitySelectorConfig(
+            multiple=False,
+            domain="sensor",
+        )
+    )
+
+
+def _climate_entity_selector():
+    """One or more thermostats. Multiple allowed for multi-zone homes; the
+    add-on averages setpoints across zones in the daily rollup."""
+    return selector.EntitySelector(
+        selector.EntitySelectorConfig(
+            multiple=True,
+            domain="climate",
         )
     )
 
@@ -111,6 +135,8 @@ class ShellyAddonOptionsFlow(config_entries.OptionsFlow):
         current_tracked = self.config_entry.options.get(CONF_TRACKED_ENTITIES, [])
         current_energy = self.config_entry.options.get(CONF_ENERGY_ENTITIES, [])
         current_weather = self.config_entry.options.get(CONF_WEATHER_ENTITY)
+        current_gas = self.config_entry.options.get(CONF_GAS_ENTITY)
+        current_climate = self.config_entry.options.get(CONF_CLIMATE_ENTITIES, [])
         schema_dict: dict = {
             vol.Optional(CONF_TRACKED_ENTITIES, default=current_tracked): _entity_selector(),
             vol.Optional(CONF_ENERGY_ENTITIES,  default=current_energy):  _energy_entity_selector(),
@@ -119,6 +145,11 @@ class ShellyAddonOptionsFlow(config_entries.OptionsFlow):
             schema_dict[vol.Optional(CONF_WEATHER_ENTITY, default=current_weather)] = _weather_entity_selector()
         else:
             schema_dict[vol.Optional(CONF_WEATHER_ENTITY)] = _weather_entity_selector()
+        if current_gas:
+            schema_dict[vol.Optional(CONF_GAS_ENTITY, default=current_gas)] = _gas_entity_selector()
+        else:
+            schema_dict[vol.Optional(CONF_GAS_ENTITY)] = _gas_entity_selector()
+        schema_dict[vol.Optional(CONF_CLIMATE_ENTITIES, default=current_climate)] = _climate_entity_selector()
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(schema_dict),

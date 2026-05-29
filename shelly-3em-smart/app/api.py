@@ -21,7 +21,10 @@ from .state import state
 from .weather import (
     backfill_recent_rollups,
     compute_rollup,
+    get_today_forecast,
     latest_weather,
+    record_gas_reading,
+    record_setpoint_sample,
     record_weather_reading,
     weather_anomaly,
 )
@@ -49,6 +52,8 @@ def info():
         "weather_entity_id": settings.weather_entity_id,
         "hdd_cdd_base_temp_f": settings.hdd_cdd_base_temp_f,
         "temp_unit": settings.temp_unit,
+        "gas_rate_dollars_per_therm": settings.gas_rate_dollars_per_therm,
+        "heating_fuel_kind": settings.heating_fuel_kind,
     }
 
 
@@ -100,28 +105,82 @@ class WeatherReadingIn(BaseModel):
     condition: Optional[str] = None
     source: Optional[str] = None
     ts: Optional[float] = None
+    forecast_high_f: Optional[float] = None
+    forecast_low_f: Optional[float] = None
 
 
 @router.post("/api/weather_reading")
 def post_weather_reading(body: WeatherReadingIn):
     """Pushed by the HACS integration every ~60s from the configured
-    weather entity. Temperature must be in Fahrenheit (the integration
-    converts from HA's unit before sending so the add-on stays unit-agnostic
-    on the wire)."""
+    weather entity. Temperature must be in Fahrenheit. forecast_high_f /
+    forecast_low_f are best-effort — sent when the weather entity exposes
+    a daily forecast, used by the dashboard's today H/L card so it has a
+    meaningful range before empirical min/max has built up."""
     return record_weather_reading(
         temp_f=body.temp_f,
         humidity=body.humidity,
         condition=body.condition,
         source=body.source,
         ts=body.ts,
+        forecast_high_f=body.forecast_high_f,
+        forecast_low_f=body.forecast_low_f,
+    )
+
+
+class GasReadingIn(BaseModel):
+    cumulative: float            # cumulative reading from the meter
+    unit: Optional[str] = None   # 'therm', 'ccf', 'ft3', 'm3', 'kWh' etc.
+    source: Optional[str] = None
+    ts: Optional[float] = None
+
+
+@router.post("/api/gas_reading")
+def post_gas_reading(body: GasReadingIn):
+    """Pushed by the HACS integration when a gas meter sensor is configured.
+    The add-on normalises to therms on ingest."""
+    return record_gas_reading(
+        cumulative=body.cumulative,
+        unit=body.unit,
+        source=body.source,
+        ts=body.ts,
+    )
+
+
+class SetpointReadingIn(BaseModel):
+    entity_id: str
+    target_temp_f: Optional[float] = None
+    target_low_f: Optional[float] = None
+    target_high_f: Optional[float] = None
+    current_temp_f: Optional[float] = None
+    hvac_mode: Optional[str] = None
+    hvac_action: Optional[str] = None
+    ts: Optional[float] = None
+
+
+@router.post("/api/setpoint_reading")
+def post_setpoint_reading(body: SetpointReadingIn):
+    """Climate entity snapshot from the HACS poller. Temperatures pre-converted
+    to Fahrenheit on the integration side."""
+    return record_setpoint_sample(
+        entity_id=body.entity_id,
+        target_temp_f=body.target_temp_f,
+        target_low_f=body.target_low_f,
+        target_high_f=body.target_high_f,
+        current_temp_f=body.current_temp_f,
+        hvac_mode=body.hvac_mode,
+        hvac_action=body.hvac_action,
+        ts=body.ts,
     )
 
 
 @router.get("/api/weather/now")
 def get_weather_now():
-    """Latest outside-temperature reading + today's HDD/CDD progress."""
+    """Latest outside-temperature reading + today's HDD/CDD progress.
+    Surfaces forecast H/L when available so the dashboard can show
+    meaningful values before empirical min/max has built up across the day."""
     latest = latest_weather() or {}
     today_row = compute_rollup(__import__("datetime").date.today(), force=True) or {}
+    fc = get_today_forecast() or {}
     return {
         "temp_f": latest.get("temp_f"),
         "humidity": latest.get("humidity"),
@@ -130,8 +189,15 @@ def get_weather_now():
         "today_avg_f": today_row.get("avg_temp_f"),
         "today_min_f": today_row.get("min_temp_f"),
         "today_max_f": today_row.get("max_temp_f"),
+        "today_forecast_high_f": fc.get("forecast_high_f"),
+        "today_forecast_low_f":  fc.get("forecast_low_f"),
         "today_hdd": today_row.get("hdd"),
         "today_cdd": today_row.get("cdd"),
+        "today_cooling_kwh": (today_row.get("cooling_wh") or 0) / 1000.0 if today_row.get("cooling_wh") is not None else None,
+        "today_heating_kwh": (today_row.get("heating_wh") or 0) / 1000.0 if today_row.get("heating_wh") is not None else None,
+        "today_heating_therms": today_row.get("heating_therms"),
+        "today_avg_cool_setpoint_f": today_row.get("avg_cool_setpoint_f"),
+        "today_avg_heat_setpoint_f": today_row.get("avg_heat_setpoint_f"),
         "base_temp_f": settings.hdd_cdd_base_temp_f,
         "temp_unit": settings.temp_unit,
     }
@@ -147,13 +213,22 @@ def get_daily_rollups(days: int = 30):
     with cursor() as cur:
         cur.execute(
             """SELECT date_str, day_start_ts, panel_wh, hvac_wh,
-                      avg_temp_f, min_temp_f, max_temp_f, hdd, cdd, base_temp_f, sample_count
+                      cooling_wh, heating_wh, heating_therms,
+                      avg_temp_f, min_temp_f, max_temp_f,
+                      forecast_high_f, forecast_low_f,
+                      hdd, cdd, base_temp_f,
+                      avg_cool_setpoint_f, avg_heat_setpoint_f,
+                      sample_count
                FROM daily_rollups WHERE day_start_ts >= ? ORDER BY date_str""",
             (cutoff,),
         )
         cols = ["date_str", "day_start_ts", "panel_wh", "hvac_wh",
+                "cooling_wh", "heating_wh", "heating_therms",
                 "avg_temp_f", "min_temp_f", "max_temp_f",
-                "hdd", "cdd", "base_temp_f", "sample_count"]
+                "forecast_high_f", "forecast_low_f",
+                "hdd", "cdd", "base_temp_f",
+                "avg_cool_setpoint_f", "avg_heat_setpoint_f",
+                "sample_count"]
         rows = [dict(zip(cols, row)) for row in cur.fetchall()]
     return {
         "days": rows,
@@ -161,6 +236,7 @@ def get_daily_rollups(days: int = 30):
         "temp_unit": settings.temp_unit,
         "rate_cents_per_kwh": settings.electricity_rate_cents_per_kwh,
         "currency_symbol": settings.currency_symbol,
+        "gas_rate_dollars_per_therm": settings.gas_rate_dollars_per_therm,
     }
 
 
@@ -815,7 +891,8 @@ class DeviceUpdate(BaseModel):
     name: Optional[str] = None
     notes: Optional[str] = None
     is_continuous: Optional[bool] = None
-    is_hvac: Optional[bool] = None
+    is_hvac: Optional[bool] = None        # legacy: maps to hvac_role='cooling'
+    hvac_role: Optional[str] = None       # 'cooling' | 'heating' | '' (clear)
     force_state: Optional[str] = None   # 'on' | 'off' to manually toggle
 
 
@@ -832,15 +909,28 @@ def update_device(device_id: int, body: DeviceUpdate):
     if body.is_continuous is not None:
         fields.append("is_continuous = ?")
         values.append(1 if body.is_continuous else 0)
-    if body.is_hvac is not None:
-        # Only one device is treated as "the HVAC" at a time — having two
-        # would double-count in the rollup model. Clear the flag on others
-        # before setting it here.
-        if body.is_hvac:
-            with cursor() as cur:
-                cur.execute("UPDATE devices SET is_hvac = 0 WHERE id != ?", (device_id,))
+    # hvac_role supersedes is_hvac. Accept both for backwards-compat with the
+    # 0.6.0 UI: a true is_hvac without an explicit role maps to cooling.
+    new_role = body.hvac_role
+    if new_role is None and body.is_hvac is not None:
+        new_role = "cooling" if body.is_hvac else ""
+    if new_role is not None:
+        role = (new_role or "").strip().lower()
+        if role not in ("cooling", "heating", ""):
+            raise HTTPException(status_code=400, detail="hvac_role must be 'cooling', 'heating', or empty")
+        with cursor() as cur:
+            if role:
+                # Only one device per role at a time so the per-role rollup
+                # totals don't double-count.
+                cur.execute(
+                    "UPDATE devices SET hvac_role = NULL WHERE hvac_role = ? AND id != ?",
+                    (role, device_id),
+                )
+        fields.append("hvac_role = ?")
+        values.append(role or None)
+        # Keep is_hvac in sync for any callers still reading the legacy column.
         fields.append("is_hvac = ?")
-        values.append(1 if body.is_hvac else 0)
+        values.append(1 if role == "cooling" else 0)
 
     now = time.time()
     if body.force_state == "on":

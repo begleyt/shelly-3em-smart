@@ -9,7 +9,9 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    CONF_CLIMATE_ENTITIES,
     CONF_ENERGY_ENTITIES,
+    CONF_GAS_ENTITY,
     CONF_HOST,
     CONF_PORT,
     CONF_TRACKED_ENTITIES,
@@ -17,7 +19,9 @@ from .const import (
     DOMAIN,
 )
 from .coordinator import ShellyAddonClient, ShellyAddonCoordinator
+from .ha_climate_poller import setup_climate_poller
 from .ha_energy_poller import setup_energy_poller
+from .ha_gas_poller import setup_gas_poller
 from .ha_listener import setup_ha_event_listener
 from .ha_weather_poller import setup_weather_poller
 
@@ -56,6 +60,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     weather_entity = entry.options.get(CONF_WEATHER_ENTITY)
     unsub_weather = setup_weather_poller(hass, client, weather_entity)
     entry.async_on_unload(unsub_weather)
+
+    # Gas meter (if configured) — feeds the Heating section of Climate tab.
+    gas_entity = entry.options.get(CONF_GAS_ENTITY)
+    unsub_gas = setup_gas_poller(hass, client, gas_entity)
+    entry.async_on_unload(unsub_gas)
+
+    # Climate / thermostat setpoints — feeds the setpoint timeline overlay.
+    climate_entities = list(entry.options.get(CONF_CLIMATE_ENTITIES, []))
+    unsub_climate = setup_climate_poller(hass, client, climate_entities)
+    entry.async_on_unload(unsub_climate)
 
     # Reload when the user changes the options.
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))

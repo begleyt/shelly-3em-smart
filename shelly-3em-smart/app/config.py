@@ -77,6 +77,13 @@ class Settings:
     temp_unit: str = field(default_factory=lambda: _env("TEMP_UNIT", "F"))   # 'F' | 'C' (display only)
     weather_retention_days: int = field(default_factory=lambda: _env_int("WEATHER_RETENTION_DAYS", 400))
 
+    # Heating-fuel correlation. Useful when the HVAC is gas-fired (or propane /
+    # oil): the HACS integration polls a cumulative-volume HA sensor and the
+    # add-on normalises everything to therms. gas_rate_dollars_per_therm
+    # mirrors electricity_rate_cents_per_kwh for cost overlays.
+    gas_rate_dollars_per_therm: float = field(default_factory=lambda: _env_float("GAS_RATE_DOLLARS_PER_THERM", 0.0))
+    heating_fuel_kind: str = field(default_factory=lambda: _env("HEATING_FUEL_KIND", "natural_gas"))   # informational only
+
     @property
     def mqtt_enabled(self) -> bool:
         return self.mqtt_host is not None
