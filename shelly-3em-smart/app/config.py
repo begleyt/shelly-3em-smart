@@ -68,6 +68,15 @@ class Settings:
     electricity_rate_cents_per_kwh: float = field(default_factory=lambda: _env_float("ELECTRICITY_RATE_CENTS_PER_KWH", 0.0))
     currency_symbol: str = field(default_factory=lambda: _env("CURRENCY_SYMBOL", "$"))
 
+    # Weather correlation. Set weather_entity_id to a HA weather.* or
+    # sensor.<outside_temp> entity; the HACS integration will poll it and POST
+    # readings to /api/weather_reading. hdd_cdd_base_temp_f is the balance-point
+    # temperature for Heating- and Cooling-Degree-Day calcs (US convention is 65°F).
+    weather_entity_id: Optional[str] = field(default_factory=lambda: _env("WEATHER_ENTITY_ID"))
+    hdd_cdd_base_temp_f: float = field(default_factory=lambda: _env_float("HDD_CDD_BASE_TEMP_F", 65.0))
+    temp_unit: str = field(default_factory=lambda: _env("TEMP_UNIT", "F"))   # 'F' | 'C' (display only)
+    weather_retention_days: int = field(default_factory=lambda: _env_int("WEATHER_RETENTION_DAYS", 400))
+
     @property
     def mqtt_enabled(self) -> bool:
         return self.mqtt_host is not None

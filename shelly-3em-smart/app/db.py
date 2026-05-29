@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS devices (
     total_energy_wh  REAL NOT NULL DEFAULT 0,
     source_entity_id TEXT,
     is_continuous    INTEGER NOT NULL DEFAULT 0,
-    energy_source    TEXT NOT NULL DEFAULT 'inferred'   -- 'inferred' or 'metered'
+    energy_source    TEXT NOT NULL DEFAULT 'inferred',  -- 'inferred' or 'metered'
+    is_hvac          INTEGER NOT NULL DEFAULT 0
 );
 
 -- HA-reported cumulative energy readings (e.g. smart plug kWh sensors).
@@ -138,6 +139,44 @@ CREATE TABLE IF NOT EXISTS device_state_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_device_state_log_device ON device_state_log(device_id, ts);
+
+-- Outside-temperature samples pushed by the HACS integration from the user's
+-- HA weather.* or sensor.* entity. Stored in Fahrenheit (CDD/HDD convention);
+-- the UI converts on display per the user's unit preference.
+CREATE TABLE IF NOT EXISTS weather_samples (
+    ts          REAL PRIMARY KEY,
+    temp_f      REAL,
+    humidity    REAL,
+    condition   TEXT,
+    source      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_weather_samples_ts ON weather_samples(ts);
+
+-- One row per local-calendar day, rebuilt nightly. Holds the panel-wide kWh,
+-- optional HVAC-device kWh, daily temperature stats, and HDD/CDD totals.
+-- date_str is local-time YYYY-MM-DD; day_start_ts is its midnight in epoch s.
+CREATE TABLE IF NOT EXISTS daily_rollups (
+    date_str        TEXT PRIMARY KEY,
+    day_start_ts    REAL NOT NULL,
+    panel_wh        REAL NOT NULL DEFAULT 0,
+    hvac_wh         REAL,
+    avg_temp_f      REAL,
+    min_temp_f      REAL,
+    max_temp_f      REAL,
+    hdd             REAL,
+    cdd             REAL,
+    base_temp_f     REAL,
+    sample_count    INTEGER,
+    rolled_up_ts    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_daily_rollups_day_start ON daily_rollups(day_start_ts);
+
+-- Simple key-value bag for user prefs set from the UI (e.g. which device is
+-- the HVAC target). Avoids hardcoding device IDs in add-on options.
+CREATE TABLE IF NOT EXISTS app_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
@@ -180,6 +219,9 @@ def _migrate(c: sqlite3.Connection) -> None:
 
     if "energy_source" not in cols:
         c.execute("ALTER TABLE devices ADD COLUMN energy_source TEXT NOT NULL DEFAULT 'inferred'")
+
+    if "is_hvac" not in cols:
+        c.execute("ALTER TABLE devices ADD COLUMN is_hvac INTEGER NOT NULL DEFAULT 0")
 
 
 def conn() -> sqlite3.Connection:

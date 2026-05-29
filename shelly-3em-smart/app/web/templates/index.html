@@ -19,6 +19,7 @@
 
 <nav class="tabs">
   <button class="tab active" data-tab="insights">Insights</button>
+  <button class="tab" data-tab="climate">Climate</button>
   <button class="tab" data-tab="live">Live</button>
   <button class="tab" data-tab="devices">Devices</button>
   <button class="tab" data-tab="clusters">Unlabeled Clusters</button>
@@ -139,6 +140,93 @@
       Energy figures are estimates from inferred on-times × snapshot mean wattage per device.
       Panel total is integrated from second-level samples and is the authoritative figure for whole-house consumption.
     </p>
+  </section>
+
+  <!-- CLIMATE -->
+  <section id="tab-climate" class="tab-panel">
+    <div class="card" id="climate-banner" style="display:none;">
+      <div class="card-label">Weather correlation not configured</div>
+      <p class="muted" style="font-size:0.9rem;margin-top:6px;">
+        Set <code>weather_entity_id</code> in the add-on options, then pick the same
+        entity in the HACS integration's options. Outside-temperature readings
+        will start flowing within a minute.
+      </p>
+    </div>
+
+    <!-- Today summary -->
+    <div class="climate-now-grid">
+      <div class="card climate-now-card">
+        <div class="card-label">Outside now</div>
+        <div class="climate-temp" id="climate-now-temp">—</div>
+        <div class="muted" id="climate-now-meta">—</div>
+      </div>
+      <div class="card climate-now-card">
+        <div class="card-label">Today high / low</div>
+        <div class="climate-hilo" id="climate-hilo">—</div>
+        <div class="muted" id="climate-avg">—</div>
+      </div>
+      <div class="card climate-now-card">
+        <div class="card-label">Heating degree-days</div>
+        <div class="climate-dd" id="climate-hdd">—</div>
+        <div class="muted" id="climate-hdd-meta">—</div>
+      </div>
+      <div class="card climate-now-card">
+        <div class="card-label">Cooling degree-days</div>
+        <div class="climate-dd" id="climate-cdd">—</div>
+        <div class="muted" id="climate-cdd-meta">—</div>
+      </div>
+    </div>
+
+    <!-- Anomaly callout -->
+    <div class="card" id="climate-anomaly" style="display:none;">
+      <div class="card-label">Today vs weather-predicted baseline</div>
+      <div class="anomaly-grid">
+        <div>
+          <div class="muted">Predicted so far</div>
+          <div class="anomaly-value" id="anomaly-predicted">—</div>
+        </div>
+        <div>
+          <div class="muted">Actual so far</div>
+          <div class="anomaly-value" id="anomaly-actual">—</div>
+        </div>
+        <div>
+          <div class="muted">Delta</div>
+          <div class="anomaly-value" id="anomaly-delta">—</div>
+        </div>
+        <div>
+          <div class="muted">Model fit (R²)</div>
+          <div class="anomaly-value" id="anomaly-r2">—</div>
+        </div>
+      </div>
+      <p class="muted" style="font-size:0.85rem;margin-top:8px;" id="anomaly-explain">—</p>
+    </div>
+
+    <!-- Charts: scatter (kWh vs temp) + bar (HDD/CDD per day) -->
+    <div class="two-col">
+      <div class="card">
+        <div class="card-label">Daily kWh vs outside avg temp <span class="muted" style="font-weight:400;font-size:0.8rem;">— last 30 days</span></div>
+        <div style="position:relative;height:280px;margin-top:8px;">
+          <canvas id="climate-scatter"></canvas>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-label">HDD / CDD per day <span class="muted" style="font-weight:400;font-size:0.8rem;">— base <span id="climate-base-temp">65°F</span></span></div>
+        <div style="position:relative;height:280px;margin-top:8px;">
+          <canvas id="climate-degree-bars"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- HVAC device callout if tagged -->
+    <div class="card" id="climate-hvac-card" style="display:none;">
+      <div class="card-label">HVAC-only correlation <span class="muted" style="font-weight:400;font-size:0.8rem;">— device tagged: <span id="climate-hvac-name">—</span></span></div>
+      <div style="position:relative;height:240px;margin-top:8px;">
+        <canvas id="climate-hvac-scatter"></canvas>
+      </div>
+      <p class="muted" style="font-size:0.85rem;margin-top:8px;">
+        Tag a different device as HVAC in the Devices tab to swap.
+      </p>
+    </div>
   </section>
 
   <!-- LIVE -->
@@ -281,6 +369,11 @@
       <span style="color:var(--fg);">Continuous load (don't toggle via event matching)</span>
     </label>
     <p class="muted" style="font-size:0.75rem;margin-top:4px;">For continuous devices the state is controlled by you via the buttons below, not by step events.</p>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer;">
+      <input id="edit-hvac" type="checkbox" style="width:auto;margin:0;" />
+      <span style="color:var(--fg);">This is the HVAC device (correlate against outside temperature)</span>
+    </label>
+    <p class="muted" style="font-size:0.75rem;margin-top:4px;">Only one device can be tagged as HVAC. The Climate tab uses it for the HVAC-only scatter plot. Setting this here will clear it on any other device.</p>
     <div class="actions" style="margin-top:12px;">
       <button id="edit-force-on">Mark On</button>
       <button id="edit-force-off">Mark Off</button>
