@@ -9,6 +9,8 @@ CONF_HOST = "host"
 CONF_PORT = "port"
 CONF_TRACKED_ENTITIES = "tracked_entities"
 CONF_ENERGY_ENTITIES = "energy_entities"
+CONF_WEATHER_ENTITY = "weather_entity"
+CONF_OUTDOOR_TEMP_ENTITY = "outdoor_temp_entity"
 
 SCAN_INTERVAL = timedelta(seconds=2)
 
@@ -23,3 +25,7 @@ TRACKABLE_DOMAINS = ["switch", "light", "fan", "binary_sensor", "input_boolean"]
 
 # Polling interval for energy sensors (HA cumulative kWh entities).
 ENERGY_POLL_INTERVAL_S = 30
+
+# Polling interval for the outside-temperature entity. Once a minute is more
+# than enough for HDD/CDD calcs (which only need a per-day average).
+WEATHER_POLL_INTERVAL_S = 60

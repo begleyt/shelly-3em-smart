@@ -18,6 +18,13 @@ from .inference import absorb_unlabeled_clusters
 from .insights import all_device_stats, anomaly_check, device_stats, history_summary, insights, panel_energy_today, phantom_load
 from .mqtt_publisher import publisher
 from .state import state
+from .weather import (
+    backfill_recent_rollups,
+    compute_rollup,
+    latest_weather,
+    record_weather_reading,
+    weather_anomaly,
+)
 
 router = APIRouter()
 
@@ -38,6 +45,10 @@ def info():
         "supports_ha_energy": True,
         "rate_cents_per_kwh": settings.electricity_rate_cents_per_kwh,
         "currency_symbol": settings.currency_symbol,
+        "supports_weather": True,
+        "weather_entity_id": settings.weather_entity_id,
+        "hdd_cdd_base_temp_f": settings.hdd_cdd_base_temp_f,
+        "temp_unit": settings.temp_unit,
     }
 
 
@@ -79,6 +90,98 @@ def get_history_summary():
             "rate_cents_per_kwh": settings.electricity_rate_cents_per_kwh,
             "currency_symbol": settings.currency_symbol,
         }
+
+
+# ---------- weather / climate (v0.6.0) ----------
+
+class WeatherReadingIn(BaseModel):
+    temp_f: float
+    humidity: Optional[float] = None
+    condition: Optional[str] = None
+    source: Optional[str] = None
+    ts: Optional[float] = None
+
+
+@router.post("/api/weather_reading")
+def post_weather_reading(body: WeatherReadingIn):
+    """Pushed by the HACS integration every ~60s from the configured
+    weather entity. Temperature must be in Fahrenheit (the integration
+    converts from HA's unit before sending so the add-on stays unit-agnostic
+    on the wire)."""
+    return record_weather_reading(
+        temp_f=body.temp_f,
+        humidity=body.humidity,
+        condition=body.condition,
+        source=body.source,
+        ts=body.ts,
+    )
+
+
+@router.get("/api/weather/now")
+def get_weather_now():
+    """Latest outside-temperature reading + today's HDD/CDD progress."""
+    latest = latest_weather() or {}
+    today_row = compute_rollup(__import__("datetime").date.today(), force=True) or {}
+    return {
+        "temp_f": latest.get("temp_f"),
+        "humidity": latest.get("humidity"),
+        "condition": latest.get("condition"),
+        "ts": latest.get("ts"),
+        "today_avg_f": today_row.get("avg_temp_f"),
+        "today_min_f": today_row.get("min_temp_f"),
+        "today_max_f": today_row.get("max_temp_f"),
+        "today_hdd": today_row.get("hdd"),
+        "today_cdd": today_row.get("cdd"),
+        "base_temp_f": settings.hdd_cdd_base_temp_f,
+        "temp_unit": settings.temp_unit,
+    }
+
+
+@router.get("/api/daily_rollups")
+def get_daily_rollups(days: int = 30):
+    """Daily kWh + temperature + HDD/CDD for the last N days. Used by the
+    Climate tab's scatter and bar charts. Bounded by sqlite contents — days
+    with no data are simply absent."""
+    days = max(1, min(days, 400))
+    cutoff = time.time() - days * 86400
+    with cursor() as cur:
+        cur.execute(
+            """SELECT date_str, day_start_ts, panel_wh, hvac_wh,
+                      avg_temp_f, min_temp_f, max_temp_f, hdd, cdd, base_temp_f, sample_count
+               FROM daily_rollups WHERE day_start_ts >= ? ORDER BY date_str""",
+            (cutoff,),
+        )
+        cols = ["date_str", "day_start_ts", "panel_wh", "hvac_wh",
+                "avg_temp_f", "min_temp_f", "max_temp_f",
+                "hdd", "cdd", "base_temp_f", "sample_count"]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+    return {
+        "days": rows,
+        "base_temp_f": settings.hdd_cdd_base_temp_f,
+        "temp_unit": settings.temp_unit,
+        "rate_cents_per_kwh": settings.electricity_rate_cents_per_kwh,
+        "currency_symbol": settings.currency_symbol,
+    }
+
+
+@router.get("/api/weather/anomaly")
+def get_weather_anomaly():
+    """Regression-based anomaly: how today's actual usage compares to what
+    a 30-day HDD/CDD model would predict for today's outside temperature."""
+    try:
+        return weather_anomaly()
+    except sqlite3.OperationalError as e:
+        log.warning("get_weather_anomaly: db unavailable: %s", e)
+        return {"verdict": "unavailable", "history_days": 0}
+
+
+@router.post("/api/weather/rebuild_rollups")
+def rebuild_rollups(days: int = 31):
+    """Force-rebuild the last N daily rollups. Call this after tagging a
+    device as HVAC or changing the HDD/CDD base temperature so the existing
+    rows reflect the new config."""
+    rebuilt = backfill_recent_rollups(days=max(1, min(days, 400)))
+    return {"rebuilt": rebuilt}
 
 
 @router.get("/api/devices/{device_id}/stats")
@@ -712,6 +815,7 @@ class DeviceUpdate(BaseModel):
     name: Optional[str] = None
     notes: Optional[str] = None
     is_continuous: Optional[bool] = None
+    is_hvac: Optional[bool] = None
     force_state: Optional[str] = None   # 'on' | 'off' to manually toggle
 
 
@@ -728,6 +832,15 @@ def update_device(device_id: int, body: DeviceUpdate):
     if body.is_continuous is not None:
         fields.append("is_continuous = ?")
         values.append(1 if body.is_continuous else 0)
+    if body.is_hvac is not None:
+        # Only one device is treated as "the HVAC" at a time — having two
+        # would double-count in the rollup model. Clear the flag on others
+        # before setting it here.
+        if body.is_hvac:
+            with cursor() as cur:
+                cur.execute("UPDATE devices SET is_hvac = 0 WHERE id != ?", (device_id,))
+        fields.append("is_hvac = ?")
+        values.append(1 if body.is_hvac else 0)
 
     now = time.time()
     if body.force_state == "on":

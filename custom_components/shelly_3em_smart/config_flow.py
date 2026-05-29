@@ -15,6 +15,7 @@ from .const import (
     CONF_HOST,
     CONF_PORT,
     CONF_TRACKED_ENTITIES,
+    CONF_WEATHER_ENTITY,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DOMAIN,
@@ -37,6 +38,18 @@ def _energy_entity_selector():
             multiple=True,
             domain="sensor",
             device_class="energy",
+        )
+    )
+
+
+def _weather_entity_selector():
+    """Accept a weather.* domain entity OR a sensor.* with device_class
+    temperature — covers both 'use my HA weather provider' and 'I have a
+    discrete outdoor temperature sensor'."""
+    return selector.EntitySelector(
+        selector.EntitySelectorConfig(
+            multiple=False,
+            domain=["weather", "sensor"],
         )
     )
 
@@ -97,12 +110,16 @@ class ShellyAddonOptionsFlow(config_entries.OptionsFlow):
 
         current_tracked = self.config_entry.options.get(CONF_TRACKED_ENTITIES, [])
         current_energy = self.config_entry.options.get(CONF_ENERGY_ENTITIES, [])
+        current_weather = self.config_entry.options.get(CONF_WEATHER_ENTITY)
+        schema_dict: dict = {
+            vol.Optional(CONF_TRACKED_ENTITIES, default=current_tracked): _entity_selector(),
+            vol.Optional(CONF_ENERGY_ENTITIES,  default=current_energy):  _energy_entity_selector(),
+        }
+        if current_weather:
+            schema_dict[vol.Optional(CONF_WEATHER_ENTITY, default=current_weather)] = _weather_entity_selector()
+        else:
+            schema_dict[vol.Optional(CONF_WEATHER_ENTITY)] = _weather_entity_selector()
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(CONF_TRACKED_ENTITIES, default=current_tracked): _entity_selector(),
-                    vol.Optional(CONF_ENERGY_ENTITIES,  default=current_energy):  _energy_entity_selector(),
-                }
-            ),
+            data_schema=vol.Schema(schema_dict),
         )

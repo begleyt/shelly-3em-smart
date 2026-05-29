@@ -8,10 +8,18 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import CONF_ENERGY_ENTITIES, CONF_HOST, CONF_PORT, CONF_TRACKED_ENTITIES, DOMAIN
+from .const import (
+    CONF_ENERGY_ENTITIES,
+    CONF_HOST,
+    CONF_PORT,
+    CONF_TRACKED_ENTITIES,
+    CONF_WEATHER_ENTITY,
+    DOMAIN,
+)
 from .coordinator import ShellyAddonClient, ShellyAddonCoordinator
 from .ha_energy_poller import setup_energy_poller
 from .ha_listener import setup_ha_event_listener
+from .ha_weather_poller import setup_weather_poller
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,6 +51,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     energy_entities = list(entry.options.get(CONF_ENERGY_ENTITIES, []))
     unsub_energy = setup_energy_poller(hass, client, energy_entities)
     entry.async_on_unload(unsub_energy)
+
+    # Wire up the outside-temperature poller for the Climate tab.
+    weather_entity = entry.options.get(CONF_WEATHER_ENTITY)
+    unsub_weather = setup_weather_poller(hass, client, weather_entity)
+    entry.async_on_unload(unsub_weather)
 
     # Reload when the user changes the options.
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))

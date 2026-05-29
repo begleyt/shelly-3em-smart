@@ -401,6 +401,61 @@ h2 { font-size: 1rem; font-weight: 600; margin: 0 0 var(--sp-3) 0; color: var(--
   .history-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
+/* --- Climate tab --- */
+.climate-now-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-4);
+}
+.climate-now-card {
+  text-align: left;
+}
+.climate-temp {
+  font-size: 2.4rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-1);
+  margin-top: 4px;
+  line-height: 1.0;
+}
+.climate-hilo {
+  font-size: 1.6rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-1);
+  margin-top: 4px;
+  line-height: 1.0;
+}
+.climate-dd {
+  font-size: 1.8rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-1);
+  margin-top: 4px;
+  line-height: 1.0;
+}
+.anomaly-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+}
+.anomaly-value {
+  font-size: 1.3rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-1);
+  margin-top: 2px;
+}
+#climate-anomaly.above   { border-left: 4px solid var(--err, #e15759); }
+#climate-anomaly.below   { border-left: 4px solid var(--ok, #59a14f); }
+#climate-anomaly.normal  { border-left: 4px solid var(--muted, #8a93a6); }
+@media (max-width: 800px) {
+  .climate-now-grid { grid-template-columns: repeat(2, 1fr); }
+  .anomaly-grid     { grid-template-columns: repeat(2, 1fr); }
+}
+
 /* Activity feed */
 .activity-feed {
   display: flex;

@@ -89,6 +89,31 @@ class ShellyAddonClient:
         except (aiohttp.ClientError, asyncio.TimeoutError):
             pass
 
+    async def post_weather_reading(
+        self,
+        temp_f: float,
+        humidity: float | None = None,
+        condition: str | None = None,
+        source: str | None = None,
+        ts: float | None = None,
+    ) -> None:
+        payload = {
+            "temp_f": temp_f,
+            "humidity": humidity,
+            "condition": condition,
+            "source": source,
+            "ts": ts,
+        }
+        try:
+            async with self._session.post(
+                f"{self._base}/weather_reading",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as r:
+                r.raise_for_status()
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            pass
+
 
 class ShellyAddonCoordinator(DataUpdateCoordinator[dict]):
     """Polls /api/live and /api/devices every couple of seconds."""

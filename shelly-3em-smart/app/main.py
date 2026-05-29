@@ -19,6 +19,7 @@ from .inference import match_event_to_device
 from .mqtt_publisher import publisher
 from .shelly_client import run_websocket_loop
 from .state import state
+from .weather import backfill_recent_rollups, compute_rollup, prune_old_weather
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,6 +87,39 @@ async def on_sample(sample: dict) -> None:
             log.exception("Event handling failed")
 
 
+async def daily_rollup_loop(stop: asyncio.Event) -> None:
+    """Roll up today (so the live counters stay current) every 10 min, and at
+    each top of the hour also re-roll yesterday in case late samples landed.
+    Prune old weather samples once a day."""
+    from datetime import date, timedelta
+    last_hourly = 0.0
+    last_prune = 0.0
+    # Initial backfill so the Climate tab has data the moment the user opens it
+    try:
+        n = backfill_recent_rollups(days=31)
+        log.info("Backfilled %d daily rollups", n)
+    except Exception:
+        log.exception("Initial rollup backfill failed")
+    while not stop.is_set():
+        try:
+            compute_rollup(date.today(), force=True)
+            now = time.time()
+            if now - last_hourly >= 3600:
+                compute_rollup(date.today() - timedelta(days=1), force=True)
+                last_hourly = now
+            if now - last_prune >= 86400:
+                pruned = prune_old_weather()
+                if pruned:
+                    log.info("Pruned %d old weather samples", pruned)
+                last_prune = now
+        except Exception:
+            log.exception("daily_rollup_loop tick failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=600.0)
+        except asyncio.TimeoutError:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -93,6 +127,7 @@ async def lifespan(app: FastAPI):
     stop = asyncio.Event()
     ws_task = asyncio.create_task(run_websocket_loop(on_sample, stop))
     cluster_task = asyncio.create_task(cluster_loop(stop))
+    rollup_task = asyncio.create_task(daily_rollup_loop(stop))
     log.info("Startup complete (Shelly=%s, MQTT=%s)",
              settings.shelly_host,
              "on" if settings.mqtt_enabled else "off")
@@ -102,7 +137,8 @@ async def lifespan(app: FastAPI):
         stop.set()
         ws_task.cancel()
         cluster_task.cancel()
-        await asyncio.gather(ws_task, cluster_task, return_exceptions=True)
+        rollup_task.cancel()
+        await asyncio.gather(ws_task, cluster_task, rollup_task, return_exceptions=True)
         publisher.stop()
 
 

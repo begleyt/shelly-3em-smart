@@ -274,6 +274,7 @@
       btn.classList.add('active');
       $('tab-' + btn.dataset.tab).classList.add('active');
       if (btn.dataset.tab === 'insights') loadInsights();
+      if (btn.dataset.tab === 'climate') loadClimate();
       if (btn.dataset.tab === 'devices') loadDevices();
       if (btn.dataset.tab === 'clusters') loadClusters();
       if (btn.dataset.tab === 'history') loadHistory();
@@ -451,6 +452,237 @@
     setCell('hist-yesterday-kwh', 'hist-yesterday-cost', hist.yesterday);
     setCell('hist-7d-kwh',        'hist-7d-cost',        hist.last_7d);
     setCell('hist-30d-kwh',       'hist-30d-cost',       hist.last_30d);
+  }
+
+  // --- Climate / weather tab ---
+  let climateScatterChart = null;
+  let climateDegreeBarsChart = null;
+  let climateHvacScatterChart = null;
+
+  function fmtTemp(f, unitPref) {
+    if (f === null || f === undefined) return '—';
+    const useC = (unitPref === 'C');
+    const v = useC ? ((f - 32) * 5/9) : f;
+    return `${v.toFixed(1)}°${useC ? 'C' : 'F'}`;
+  }
+
+  function fmtDD(dd) {
+    if (dd === null || dd === undefined) return '0';
+    return Number(dd).toFixed(1);
+  }
+
+  async function loadClimate() {
+    const supportsWeather = appInfo && appInfo.supports_weather;
+    const unit = (appInfo && appInfo.temp_unit) || 'F';
+    const baseF = (appInfo && appInfo.hdd_cdd_base_temp_f) || 65.0;
+    $('climate-base-temp').textContent = unit === 'C'
+      ? `${((baseF - 32) * 5/9).toFixed(1)}°C`
+      : `${baseF.toFixed(0)}°F`;
+
+    // Show banner if no weather entity configured server-side
+    if (!supportsWeather || !appInfo.weather_entity_id) {
+      $('climate-banner').style.display = '';
+    } else {
+      $('climate-banner').style.display = 'none';
+    }
+
+    try {
+      const [nowR, rollR, anomR, devR] = await Promise.all([
+        fetch(API + '/weather/now'),
+        fetch(API + '/daily_rollups?days=30'),
+        fetch(API + '/weather/anomaly'),
+        fetch(API + '/devices'),
+      ]);
+      const now = nowR.ok ? await nowR.json() : null;
+      const roll = rollR.ok ? await rollR.json() : { days: [] };
+      const anom = anomR.ok ? await anomR.json() : null;
+      const devs = devR.ok ? await devR.json() : [];
+
+      renderClimateNow(now, unit);
+      renderClimateAnomaly(anom);
+      renderClimateScatter(roll.days || [], unit);
+      renderClimateDegreeBars(roll.days || [], unit);
+      renderClimateHvac(roll.days || [], devs, unit);
+    } catch (e) {
+      console.warn('climate fetch failed', e);
+    }
+  }
+
+  function renderClimateNow(now, unit) {
+    if (!now || now.temp_f === null || now.temp_f === undefined) {
+      $('climate-now-temp').textContent = '—';
+      $('climate-now-meta').textContent = 'No weather data yet';
+      $('climate-hilo').textContent = '—';
+      $('climate-avg').textContent = '—';
+      $('climate-hdd').textContent = '—';
+      $('climate-hdd-meta').textContent = '—';
+      $('climate-cdd').textContent = '—';
+      $('climate-cdd-meta').textContent = '—';
+      return;
+    }
+    $('climate-now-temp').textContent = fmtTemp(now.temp_f, unit);
+    const parts = [];
+    if (now.condition) parts.push(now.condition);
+    if (now.humidity !== null && now.humidity !== undefined) parts.push(`${Math.round(now.humidity)}% RH`);
+    $('climate-now-meta').textContent = parts.join(' · ') || '—';
+
+    $('climate-hilo').textContent =
+      `${fmtTemp(now.today_max_f, unit)} / ${fmtTemp(now.today_min_f, unit)}`;
+    $('climate-avg').textContent = `avg ${fmtTemp(now.today_avg_f, unit)}`;
+
+    $('climate-hdd').textContent = fmtDD(now.today_hdd);
+    $('climate-cdd').textContent = fmtDD(now.today_cdd);
+    const baseLabel = unit === 'C'
+      ? `${((now.base_temp_f - 32) * 5/9).toFixed(1)}°C`
+      : `${now.base_temp_f.toFixed(0)}°F`;
+    $('climate-hdd-meta').textContent = `vs ${baseLabel} base`;
+    $('climate-cdd-meta').textContent = `vs ${baseLabel} base`;
+  }
+
+  function renderClimateAnomaly(anom) {
+    const banner = $('climate-anomaly');
+    if (!anom || !anom.model || anom.verdict === 'insufficient_baseline' || anom.verdict === 'unavailable') {
+      banner.style.display = 'none';
+      return;
+    }
+    banner.style.display = '';
+    banner.classList.remove('above', 'below', 'normal');
+    if (anom.verdict === 'above_baseline') banner.classList.add('above');
+    else if (anom.verdict === 'below_baseline') banner.classList.add('below');
+    else banner.classList.add('normal');
+
+    $('anomaly-predicted').textContent = anom.predicted_kwh_so_far !== undefined
+      ? `${anom.predicted_kwh_so_far.toFixed(2)} kWh` : '—';
+    $('anomaly-actual').textContent = `${anom.today_actual_kwh.toFixed(2)} kWh`;
+    if (anom.delta_pct !== null && anom.delta_pct !== undefined) {
+      const sign = anom.delta_pct >= 0 ? '+' : '';
+      $('anomaly-delta').textContent = `${sign}${anom.delta_pct.toFixed(0)}% (${anom.delta_kwh.toFixed(2)} kWh)`;
+    } else {
+      $('anomaly-delta').textContent = '—';
+    }
+    $('anomaly-r2').textContent = anom.model.r_squared !== undefined
+      ? anom.model.r_squared.toFixed(2) : '—';
+
+    const explain = [];
+    if (anom.verdict === 'above_baseline') {
+      explain.push('Today is running well above what the temperature would predict.');
+      explain.push('Could be a new device running, a stuck appliance, or a guest cycle.');
+    } else if (anom.verdict === 'below_baseline') {
+      explain.push('Today is running well below the temperature-predicted baseline.');
+    } else {
+      explain.push('Today\'s usage matches what the temperature predicts.');
+    }
+    explain.push(`Model fit on last ${anom.history_days} completed days.`);
+    $('anomaly-explain').textContent = explain.join(' ');
+  }
+
+  function renderClimateScatter(days, unit) {
+    const canvas = $('climate-scatter');
+    if (!canvas) return;
+    const points = days
+      .filter(d => d.avg_temp_f !== null && d.panel_wh > 0)
+      .map(d => ({
+        x: unit === 'C' ? ((d.avg_temp_f - 32) * 5/9) : d.avg_temp_f,
+        y: (d.panel_wh / 1000.0),
+        date: d.date_str,
+      }));
+    if (climateScatterChart) climateScatterChart.destroy();
+    climateScatterChart = new Chart(canvas, {
+      type: 'scatter',
+      data: { datasets: [{
+        label: 'Panel kWh / day',
+        data: points,
+        backgroundColor: '#4e79a7',
+        pointRadius: 5,
+      }]},
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: {
+            label: ctx => `${ctx.raw.date}: ${ctx.raw.y.toFixed(2)} kWh @ ${ctx.raw.x.toFixed(1)}°${unit}`,
+          }},
+        },
+        scales: {
+          x: { title: { display: true, text: `Daily avg outside temp (°${unit})`, color: '#8a93a6' }, ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' } },
+          y: { title: { display: true, text: 'kWh', color: '#8a93a6' }, ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' }, beginAtZero: true },
+        },
+      },
+    });
+  }
+
+  function renderClimateDegreeBars(days, unit) {
+    const canvas = $('climate-degree-bars');
+    if (!canvas) return;
+    const recent = days.slice(-14);   // last 14 days
+    const labels = recent.map(d => d.date_str.slice(5));   // MM-DD
+    const hdd = recent.map(d => d.hdd || 0);
+    const cdd = recent.map(d => d.cdd || 0);
+    if (climateDegreeBarsChart) climateDegreeBarsChart.destroy();
+    climateDegreeBarsChart = new Chart(canvas, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { label: 'HDD', data: hdd, backgroundColor: '#4e79a7' },
+          { label: 'CDD', data: cdd, backgroundColor: '#e15759' },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#e6e9ef' }}},
+        scales: {
+          x: { ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' }, stacked: true },
+          y: { ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' }, stacked: true, beginAtZero: true },
+        },
+      },
+    });
+  }
+
+  function renderClimateHvac(days, devices, unit) {
+    const hvac = (devices || []).find(d => d.is_hvac);
+    const card = $('climate-hvac-card');
+    if (!hvac) {
+      card.style.display = 'none';
+      return;
+    }
+    card.style.display = '';
+    $('climate-hvac-name').textContent = hvac.name;
+    const canvas = $('climate-hvac-scatter');
+    if (!canvas) return;
+    const points = days
+      .filter(d => d.avg_temp_f !== null && d.hvac_wh !== null && d.hvac_wh > 0)
+      .map(d => ({
+        x: unit === 'C' ? ((d.avg_temp_f - 32) * 5/9) : d.avg_temp_f,
+        y: d.hvac_wh / 1000.0,
+        date: d.date_str,
+      }));
+    if (climateHvacScatterChart) climateHvacScatterChart.destroy();
+    climateHvacScatterChart = new Chart(canvas, {
+      type: 'scatter',
+      data: { datasets: [{
+        label: `${hvac.name} kWh / day`,
+        data: points,
+        backgroundColor: '#e15759',
+        pointRadius: 5,
+      }]},
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: {
+            label: ctx => `${ctx.raw.date}: ${ctx.raw.y.toFixed(2)} kWh @ ${ctx.raw.x.toFixed(1)}°${unit}`,
+          }},
+        },
+        scales: {
+          x: { title: { display: true, text: `Daily avg outside temp (°${unit})`, color: '#8a93a6' }, ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' } },
+          y: { title: { display: true, text: 'kWh', color: '#8a93a6' }, ticks: { color: '#8a93a6' }, grid: { color: '#2a3340' }, beginAtZero: true },
+        },
+      },
+    });
   }
 
   let energyDonutChart = null;
@@ -880,6 +1112,7 @@
     $('edit-name').value = d.name || '';
     $('edit-notes').value = d.notes || '';
     $('edit-continuous').checked = !!d.is_continuous;
+    $('edit-hvac').checked = !!d.is_hvac;
     $('modal-edit').classList.remove('hidden');
     $('edit-name').focus();
   }
@@ -890,6 +1123,7 @@
       name: $('edit-name').value.trim() || null,
       notes: $('edit-notes').value.trim() || null,
       is_continuous: $('edit-continuous').checked,
+      is_hvac: $('edit-hvac').checked,
     };
     const r = await fetch(API + '/devices/' + editingDeviceId, {
       method: 'PATCH',
@@ -899,6 +1133,10 @@
     if (r.ok) {
       $('modal-edit').classList.add('hidden');
       loadDevices();
+      // The HVAC tag changes which device the daily rollups attribute hvac_wh
+      // to — rebuild the recent rollups so the Climate tab shows fresh data
+      // immediately rather than waiting for the next nightly tick.
+      fetch(API + '/weather/rebuild_rollups', { method: 'POST' }).catch(() => {});
     } else {
       alert('Failed to save');
     }
