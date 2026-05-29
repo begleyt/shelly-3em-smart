@@ -63,7 +63,12 @@ def classify_transition(old_state: Optional[str], new_state: Optional[str]) -> O
 def record_ha_event(entity_id: str, old_state: Optional[str], new_state: Optional[str],
                     friendly_name: Optional[str] = None, ts: Optional[float] = None) -> dict:
     """Store an HA state-change event and ensure the entity has a row in
-    `ha_entities`. Returns a summary dict for the API response."""
+    `ha_entities`. If any device is linked to this entity via
+    source_entity_id, snap that device's is_on state and write a
+    device_state_log entry — HA is authoritative for entity-linked devices,
+    so we don't have to wait for (or even require) a coincident Shelly step
+    event to update the device state. Returns a summary dict for the API
+    response."""
     if ts is None:
         ts = time.time()
     direction = classify_transition(old_state, new_state)
@@ -92,6 +97,42 @@ def record_ha_event(entity_id: str, old_state: Optional[str], new_state: Optiona
             (ts, entity_id, old_state, new_state, direction),
         )
         ha_event_id = cur.lastrowid
+
+        # Snap any device linked to this entity to the new state. Without this,
+        # entity-linked devices (e.g. an AC tracked by a binary_sensor) stay
+        # stuck in their last-correlated state if the Shelly didn't see a clear
+        # step at the same moment — manifesting as "device on for hours" with
+        # bogus attributed energy.
+        if direction in ("on", "off"):
+            cur.row_factory = _dict_row
+            cur.execute(
+                "SELECT id, is_on, mean_power_w FROM devices WHERE source_entity_id = ?",
+                (entity_id,),
+            )
+            linked = cur.fetchall()
+            for dev in linked:
+                want_on = direction == "on"
+                if bool(dev["is_on"]) == want_on:
+                    continue
+                if want_on:
+                    cur.execute(
+                        "UPDATE devices SET is_on = 1, last_on_ts = ? WHERE id = ?",
+                        (ts, dev["id"]),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE devices SET is_on = 0, last_off_ts = ? WHERE id = ?",
+                        (ts, dev["id"]),
+                    )
+                cur.execute(
+                    "INSERT INTO device_state_log (device_id, ts, state, event_id) "
+                    "VALUES (?,?,?,NULL)",
+                    (dev["id"], ts, direction),
+                )
+                log.info(
+                    "HA-driven state change: device %d -> %s (entity %s)",
+                    dev["id"], direction, entity_id,
+                )
 
     return {"id": ha_event_id, "entity_id": entity_id, "direction": direction, "ts": ts}
 

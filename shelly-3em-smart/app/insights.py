@@ -175,27 +175,56 @@ def phantom_load() -> dict:
     }
 
 
-def panel_energy_today() -> dict:
-    """Sum total_power × dt across today's samples for the panel-wide kWh."""
-    since = _today_start()
-    now = time.time()
+def panel_energy_window(start_ts: float, end_ts: float) -> dict:
+    """Trapezoidal-integrate total_power over [start_ts, end_ts] from the
+    samples table. Gaps > 5 minutes are skipped (we have no data to claim).
+    Returns wh, cost, and the actual window bounds used."""
+    if end_ts <= start_ts:
+        return {"wh": 0.0, "cost": 0.0, "since": start_ts, "until": end_ts}
     with cursor() as cur:
         cur.execute(
             "SELECT ts, total_power FROM samples "
-            "WHERE ts >= ? AND total_power IS NOT NULL ORDER BY ts",
-            (since,),
+            "WHERE ts >= ? AND ts <= ? AND total_power IS NOT NULL ORDER BY ts",
+            (start_ts, end_ts),
         )
         rows = cur.fetchall()
     if not rows:
-        return {"wh": 0.0, "cost": 0.0, "since": since, "now": now}
+        return {"wh": 0.0, "cost": 0.0, "since": start_ts, "until": end_ts}
     wh = 0.0
     prev_ts, prev_p = rows[0]
     for ts, p in rows[1:]:
         dt = ts - prev_ts
-        if 0 < dt < 300:   # ignore gaps > 5 min
+        if 0 < dt < 300:
             wh += ((prev_p + p) / 2.0) * dt / 3600.0
         prev_ts, prev_p = ts, p
-    return {"wh": wh, "cost": _cost(wh), "since": since, "now": now}
+    return {"wh": wh, "cost": _cost(wh), "since": start_ts, "until": end_ts}
+
+
+def panel_energy_today() -> dict:
+    """Sum total_power × dt across today's samples for the panel-wide kWh."""
+    since = _today_start()
+    now = time.time()
+    r = panel_energy_window(since, now)
+    return {"wh": r["wh"], "cost": r["cost"], "since": since, "now": now}
+
+
+def history_summary() -> dict:
+    """Roll up panel kWh / cost for today, yesterday, last 7d, last 30d.
+    Bounded by samples-table retention (30 days). 'today' / 'yesterday' are
+    local-time calendar days; 7d / 30d are rolling windows ending now."""
+    now = time.time()
+    today_s = _today_start()
+    yest_s = today_s - 86400
+    week_s = now - 7 * 86400
+    month_s = now - 30 * 86400
+    return {
+        "today":     panel_energy_window(today_s, now),
+        "yesterday": panel_energy_window(yest_s, today_s),
+        "last_7d":   panel_energy_window(week_s, now),
+        "last_30d":  panel_energy_window(month_s, now),
+        "rate_cents_per_kwh": settings.electricity_rate_cents_per_kwh,
+        "currency_symbol": settings.currency_symbol,
+    }
 
 
 def all_device_stats() -> list[dict]:
