@@ -612,3 +612,230 @@ def weather_anomaly() -> dict:
 
 # Keep _fit_hdd_cdd's `target` parameter robust against the renamed columns:
 # add 'panel_wh', 'cooling_wh', 'heating_wh' (already supported via dict access).
+
+
+# ---------------------------------------------------------------------------
+# Setpoint-adjusted savings model
+# ---------------------------------------------------------------------------
+#
+# Standard CDD/HDD use a fixed balance-point temperature (65 °F by default).
+# For "what would it cost if I changed my setpoint" we need to know energy as
+# a function of the indoor-outdoor differential — so we recompute degree-days
+# against the actual setpoint each day and fit:
+#
+#     cooling_kwh = a_c * setpoint_CDD + b_c   where setpoint_CDD = max(0, T_outside - cool_setpoint)
+#     heating_kwh = a_h * setpoint_HDD + b_h   where setpoint_HDD = max(0, heat_setpoint - T_outside)
+#
+# The coefficient a_c (or a_h) is "kWh per °F of differential per day". For a
+# ΔS change in setpoint at outside temperature T, the new differential shifts
+# by ΔS on the days when cooling/heating is actually needed, so the predicted
+# kWh change is a_c * (new_DD - old_DD) summed over a representative period.
+# If we don't have enough setpoint variance to fit, we fall back to the
+# industry rule of thumb (~5% per °F).
+
+_RULE_OF_THUMB_PCT_PER_F = 5.0
+_MIN_DAYS_FOR_FIT = 14
+_MIN_SETPOINT_VARIANCE_F = 1.5    # at least this much stdev in setpoints
+
+
+def _setpoint_variance(rollups: list[dict], key: str) -> float:
+    vals = [r[key] for r in rollups if r.get(key) is not None]
+    if len(vals) < 3:
+        return 0.0
+    mean = sum(vals) / len(vals)
+    return (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
+
+
+def _fit_setpoint_dd(
+    rollups: list[dict],
+    target_col: str,
+    setpoint_col: str,
+    direction: str,        # 'cool' | 'heat'
+) -> Optional[dict]:
+    """OLS fit of `target_kwh = a * setpoint_DD + b` where setpoint_DD is
+    computed per-row from outside_avg_temp and the daily avg setpoint."""
+    pts = []
+    for r in rollups:
+        target = r.get(target_col)
+        sp = r.get(setpoint_col)
+        T = r.get("avg_temp_f")
+        if target is None or target <= 0 or sp is None or T is None:
+            continue
+        if direction == "cool":
+            dd = max(0.0, T - sp)
+        else:
+            dd = max(0.0, sp - T)
+        # Skip days where DD == 0 — they contribute zero gradient and inflate
+        # the intercept; the model should describe days the unit ran
+        if dd <= 0:
+            continue
+        pts.append((dd, float(target) / 1000.0))   # kWh
+    if len(pts) < _MIN_DAYS_FOR_FIT:
+        return None
+    sp_variance = _setpoint_variance(rollups, setpoint_col)
+    if sp_variance < _MIN_SETPOINT_VARIANCE_F:
+        return None
+    n = len(pts)
+    sx = sum(p[0] for p in pts)
+    sy = sum(p[1] for p in pts)
+    sxx = sum(p[0] ** 2 for p in pts)
+    sxy = sum(p[0] * p[1] for p in pts)
+    denom = n * sxx - sx * sx
+    if abs(denom) < 1e-9:
+        return None
+    a = (n * sxy - sx * sy) / denom
+    b = (sy - a * sx) / n
+    y_mean = sy / n
+    ss_res = sum((p[1] - (a * p[0] + b)) ** 2 for p in pts)
+    ss_tot = sum((p[1] - y_mean) ** 2 for p in pts)
+    r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-9 else 0.0
+    return {
+        "kwh_per_dd": a,
+        "intercept_kwh": b,
+        "r_squared": r2,
+        "n": n,
+        "sp_variance_f": sp_variance,
+    }
+
+
+def _project_delta(
+    rollups: list[dict],
+    current_setpoint_f: float,
+    delta_f: float,
+    coef_kwh_per_dd: float,
+    direction: str,
+) -> dict:
+    """For the last ~30 days of weather, compute the kWh delta if the setpoint
+    had been (current + delta) instead. Sums across days, scales to 30-day
+    'monthly' estimate."""
+    deltas_kwh = []
+    for r in rollups:
+        T = r.get("avg_temp_f")
+        if T is None:
+            continue
+        if direction == "cool":
+            old_dd = max(0.0, T - current_setpoint_f)
+            new_dd = max(0.0, T - (current_setpoint_f + delta_f))
+        else:
+            old_dd = max(0.0, current_setpoint_f - T)
+            new_dd = max(0.0, (current_setpoint_f + delta_f) - T)
+        deltas_kwh.append(coef_kwh_per_dd * (new_dd - old_dd))
+    if not deltas_kwh:
+        return {"delta_kwh_30d": 0.0, "days_used": 0}
+    total = sum(deltas_kwh)
+    return {"delta_kwh_30d": total, "days_used": len(deltas_kwh)}
+
+
+def _project_rule_of_thumb(
+    rollups: list[dict],
+    target_col: str,
+    delta_f: float,
+    direction: str,
+) -> dict:
+    """Fallback when we can't fit a real model. Use ~5%/°F applied to the
+    last 30 days of role-specific energy. For cooling, raising setpoint
+    (positive delta) SAVES energy; for heating, raising setpoint (positive
+    delta) USES MORE energy."""
+    recent_kwh = 0.0
+    n = 0
+    for r in rollups:
+        v = r.get(target_col)
+        if v is None or v <= 0:
+            continue
+        recent_kwh += v / 1000.0
+        n += 1
+    if n == 0:
+        return {"delta_kwh_30d": 0.0, "days_used": 0}
+    pct_change = -(_RULE_OF_THUMB_PCT_PER_F / 100.0) * delta_f if direction == "cool" \
+        else (_RULE_OF_THUMB_PCT_PER_F / 100.0) * delta_f
+    return {"delta_kwh_30d": recent_kwh * pct_change, "days_used": n}
+
+
+def _current_setpoint(direction: str) -> Optional[float]:
+    """Most recent target_temp / target_low / target_high from setpoint_samples
+    across all known climate entities, averaged."""
+    col = "target_high_f" if direction == "cool" else "target_low_f"
+    with cursor() as cur:
+        cur.execute(
+            f"""SELECT entity_id, target_temp_f, {col} FROM setpoint_samples
+                WHERE ts >= ?
+                AND (target_temp_f IS NOT NULL OR {col} IS NOT NULL)
+                ORDER BY ts DESC""",
+            (time.time() - 86400 * 2,),
+        )
+        rows = cur.fetchall()
+    seen = {}
+    for ent, target, dual in rows:
+        if ent in seen:
+            continue
+        seen[ent] = dual if dual is not None else target
+    vals = [v for v in seen.values() if v is not None]
+    if not vals:
+        return None
+    return sum(vals) / len(vals)
+
+
+def setpoint_savings(deltas_f: Optional[list[float]] = None) -> dict:
+    """For each direction (cooling, heating), compute the projected monthly
+    energy and cost change for setpoint adjustments in `deltas_f` (degrees F,
+    positive = raise setpoint, negative = lower). If we have a fitted model
+    with enough setpoint variance, use it; otherwise fall back to the ~5%/°F
+    rule of thumb. Cost uses the configured electricity rate (and gas rate
+    for heating-by-gas, when no electric heating device is tagged)."""
+    if deltas_f is None:
+        deltas_f = [-2, -1, +1, +2]
+
+    history = _completed_days(limit=30)
+    rate_cents = float(settings.electricity_rate_cents_per_kwh or 0.0)
+    rate_dollars_per_kwh = rate_cents / 100.0
+    gas_rate = float(settings.gas_rate_dollars_per_therm or 0.0)
+
+    def _build(direction: str, target_col: str, setpoint_col: str, current_f: Optional[float]) -> dict:
+        model = _fit_setpoint_dd(history, target_col, setpoint_col, direction)
+        if current_f is None:
+            # Without a current setpoint we can't simulate ΔS
+            return {
+                "has_model": False,
+                "current_setpoint_f": None,
+                "method": "no_setpoint_data",
+                "needs": "no recent setpoint readings — wire up a climate entity in the HACS integration",
+                "scenarios": [],
+            }
+        scenarios = []
+        used_method = "fitted_regression" if model else "rule_of_thumb_5pct"
+        for d in deltas_f:
+            if model:
+                proj = _project_delta(history, current_f, d, model["kwh_per_dd"], direction)
+            else:
+                proj = _project_rule_of_thumb(history, target_col, d, direction)
+            dkwh = proj["delta_kwh_30d"]
+            dcost = dkwh * rate_dollars_per_kwh
+            scenarios.append({
+                "delta_f": d,
+                "monthly_kwh_delta": dkwh,
+                "monthly_cost_delta": dcost,
+                "days_used": proj["days_used"],
+            })
+        return {
+            "has_model": model is not None,
+            "current_setpoint_f": current_f,
+            "method": used_method,
+            "kwh_per_dd": model["kwh_per_dd"] if model else None,
+            "r_squared": model["r_squared"] if model else None,
+            "n": model["n"] if model else None,
+            "sp_variance_f": model["sp_variance_f"] if model else None,
+            "needs": None if model else
+                f"need ≥{_MIN_DAYS_FOR_FIT} days with cooling/heating running and ≥{_MIN_SETPOINT_VARIANCE_F:.1f}°F of setpoint variation; "
+                f"using {_RULE_OF_THUMB_PCT_PER_F}%/°F rule of thumb in the meantime",
+            "scenarios": scenarios,
+        }
+
+    cooling_now = _current_setpoint("cool")
+    heating_now = _current_setpoint("heat")
+    return {
+        "cooling": _build("cool", "cooling_wh", "avg_cool_setpoint_f", cooling_now),
+        "heating": _build("heat", "heating_wh", "avg_heat_setpoint_f", heating_now),
+        "rate_cents_per_kwh": rate_cents,
+        "currency_symbol": settings.currency_symbol,
+        "gas_rate_dollars_per_therm": gas_rate,
+    }

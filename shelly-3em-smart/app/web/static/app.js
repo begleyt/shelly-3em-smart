@@ -486,16 +486,22 @@
     }
 
     try {
-      const [nowR, rollR, anomR, devR] = await Promise.all([
+      const [nowR, rollR, anomR, devR, savR, entR, boundsR] = await Promise.all([
         fetch(API + '/weather/now'),
         fetch(API + '/daily_rollups?days=30'),
         fetch(API + '/weather/anomaly'),
         fetch(API + '/devices'),
+        fetch(API + '/setpoint/savings'),
+        fetch(API + '/setpoint/entities'),
+        fetch(API + '/setpoint/bounds'),
       ]);
       const now = nowR.ok ? await nowR.json() : null;
       const roll = rollR.ok ? await rollR.json() : { days: [] };
       const anom = anomR.ok ? await anomR.json() : null;
       const devs = devR.ok ? await devR.json() : [];
+      const savings = savR.ok ? await savR.json() : null;
+      const ents = entR.ok ? await entR.json() : { entities: [] };
+      const bounds = boundsR.ok ? await boundsR.json() : null;
 
       renderClimateNow(now, unit);
       renderClimateAnomaly(anom);
@@ -504,10 +510,257 @@
       renderCoolingSection(now, anom, roll.days || [], devs, unit);
       renderHeatingSection(now, anom, roll.days || [], devs, unit);
       renderSetpointTimeline(roll.days || [], unit);
+      renderSetpointControl(ents.entities || [], savings, bounds, unit);
     } catch (e) {
       console.warn('climate fetch failed', e);
     }
   }
+
+  // --- Setpoint control + savings preview ---
+  let currentEntities = [];
+  let currentSavings = null;
+  let savingsBounds = null;
+  let savingsUnit = 'F';
+  let originalCool = null, originalHeat = null;
+  let desiredCoolF = null, desiredHeatF = null;
+
+  function _fmtMoney(amount, currency = '$') {
+    if (amount === null || amount === undefined) return '—';
+    const sign = amount >= 0 ? '+' : '−';
+    return `${sign}${currency}${Math.abs(amount).toFixed(2)}`;
+  }
+
+  function _approxScenario(direction, deltaF) {
+    if (!currentSavings || !currentSavings[direction] || !currentSavings[direction].scenarios) return null;
+    const sc = currentSavings[direction].scenarios;
+    const exact = sc.find(s => Math.abs(s.delta_f - deltaF) < 0.01);
+    if (exact) return exact;
+    const sorted = [...sc].sort((a,b) => a.delta_f - b.delta_f);
+    let lo = null, hi = null;
+    for (const s of sorted) {
+      if (s.delta_f <= deltaF) lo = s;
+      if (s.delta_f >= deltaF && hi === null) hi = s;
+    }
+    if (lo && hi && lo.delta_f !== hi.delta_f) {
+      const t = (deltaF - lo.delta_f) / (hi.delta_f - lo.delta_f);
+      return {
+        delta_f: deltaF,
+        monthly_kwh_delta: lo.monthly_kwh_delta + t * (hi.monthly_kwh_delta - lo.monthly_kwh_delta),
+        monthly_cost_delta: lo.monthly_cost_delta + t * (hi.monthly_cost_delta - lo.monthly_cost_delta),
+      };
+    }
+    return lo || hi;
+  }
+
+  function _entitySetpoints(e) {
+    if (!e) return { cool: null, heat: null };
+    if (e.target_low_f !== null && e.target_low_f !== undefined &&
+        e.target_high_f !== null && e.target_high_f !== undefined) {
+      return { cool: e.target_high_f, heat: e.target_low_f };
+    }
+    const m = (e.hvac_mode || '').toLowerCase();
+    if (m === 'heat') return { cool: null, heat: e.target_temp_f };
+    if (m === 'cool') return { cool: e.target_temp_f, heat: null };
+    return { cool: e.target_temp_f, heat: e.target_temp_f };
+  }
+
+  function renderSetpointControl(entities, savings, bounds, unit) {
+    const card = $('setpoint-control-card');
+    if (!entities.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    currentEntities = entities;
+    currentSavings = savings;
+    savingsBounds = bounds;
+    savingsUnit = unit;
+
+    $('setpoint-needs-api').style.display = (bounds && bounds.ha_api_available) ? 'none' : '';
+
+    const sel = $('setpoint-entity-select');
+    const prev = sel.value;
+    sel.innerHTML = entities.map(e => {
+      const action = e.hvac_action ? ` · ${e.hvac_action}` : '';
+      const mode = e.hvac_mode ? ` (${e.hvac_mode})` : '';
+      return `<option value="${e.entity_id}">${e.entity_id}${mode}${action}</option>`;
+    }).join('');
+    sel.value = prev && entities.find(e => e.entity_id === prev) ? prev : entities[0].entity_id;
+
+    _refreshControlsFromSelection();
+
+    let methodTxt = [];
+    for (const dir of ['cooling', 'heating']) {
+      const s = savings && savings[dir];
+      if (!s) continue;
+      if (s.has_model) {
+        methodTxt.push(`${dir}: fitted regression (R² ${s.r_squared.toFixed(2)}, n=${s.n})`);
+      } else if (s.method === 'rule_of_thumb_5pct') {
+        methodTxt.push(`${dir}: rule of thumb (~5%/°F) — ${s.needs}`);
+      } else if (s.method === 'no_setpoint_data') {
+        methodTxt.push(`${dir}: ${s.needs}`);
+      }
+    }
+    $('savings-method-note').innerHTML = methodTxt.join('<br/>');
+  }
+
+  function _refreshControlsFromSelection() {
+    const sel = $('setpoint-entity-select');
+    const ent = currentEntities.find(e => e.entity_id === sel.value);
+    const sp = _entitySetpoints(ent);
+    originalCool = sp.cool;
+    originalHeat = sp.heat;
+    desiredCoolF = sp.cool;
+    desiredHeatF = sp.heat;
+
+    const coolSlider = $('cool-slider');
+    if (sp.cool !== null && sp.cool !== undefined && savingsBounds) {
+      coolSlider.min = savingsBounds.cool_min_f;
+      coolSlider.max = savingsBounds.cool_max_f;
+      coolSlider.value = Math.round(sp.cool);
+      coolSlider.disabled = false;
+      $('cool-current').textContent = `now ${fmtTemp(sp.cool, savingsUnit)}`;
+    } else {
+      coolSlider.disabled = true;
+      $('cool-current').textContent = 'not in this mode';
+    }
+    const heatSlider = $('heat-slider');
+    if (sp.heat !== null && sp.heat !== undefined && savingsBounds) {
+      heatSlider.min = savingsBounds.heat_min_f;
+      heatSlider.max = savingsBounds.heat_max_f;
+      heatSlider.value = Math.round(sp.heat);
+      heatSlider.disabled = false;
+      $('heat-current').textContent = `now ${fmtTemp(sp.heat, savingsUnit)}`;
+    } else {
+      heatSlider.disabled = true;
+      $('heat-current').textContent = 'not in this mode';
+    }
+    _refreshScenarios();
+  }
+
+  function _refreshScenarios() {
+    const sym = (currentSavings && currentSavings.currency_symbol) || '$';
+    if (desiredCoolF !== null && originalCool !== null) {
+      const dF = desiredCoolF - originalCool;
+      $('cool-target').textContent = `→ ${fmtTemp(desiredCoolF, savingsUnit)} ${dF !== 0 ? `(${dF > 0 ? '+' : ''}${dF.toFixed(0)}°)` : ''}`;
+      const scenario = dF === 0 ? null : _approxScenario('cooling', dF);
+      const el = $('cool-savings');
+      el.classList.remove('save', 'cost');
+      if (!scenario) {
+        el.textContent = dF === 0 ? 'no change' : 'no model — set a few different setpoints over the coming days';
+      } else {
+        const c = scenario.monthly_cost_delta;
+        const k = scenario.monthly_kwh_delta;
+        el.textContent = `≈ ${_fmtMoney(c, sym)}/mo (${k >= 0 ? '+' : ''}${k.toFixed(1)} kWh)`;
+        el.classList.add(c <= 0 ? 'save' : 'cost');
+      }
+    } else {
+      $('cool-target').textContent = '—';
+      $('cool-savings').textContent = '—';
+    }
+    if (desiredHeatF !== null && originalHeat !== null) {
+      const dF = desiredHeatF - originalHeat;
+      $('heat-target').textContent = `→ ${fmtTemp(desiredHeatF, savingsUnit)} ${dF !== 0 ? `(${dF > 0 ? '+' : ''}${dF.toFixed(0)}°)` : ''}`;
+      const scenario = dF === 0 ? null : _approxScenario('heating', dF);
+      const el = $('heat-savings');
+      el.classList.remove('save', 'cost');
+      if (!scenario) {
+        el.textContent = dF === 0 ? 'no change' : 'no model — set a few different setpoints over the coming days';
+      } else {
+        const c = scenario.monthly_cost_delta;
+        const k = scenario.monthly_kwh_delta;
+        el.textContent = `≈ ${_fmtMoney(c, sym)}/mo (${k >= 0 ? '+' : ''}${k.toFixed(1)} kWh)`;
+        el.classList.add(c <= 0 ? 'save' : 'cost');
+      }
+    } else {
+      $('heat-target').textContent = '—';
+      $('heat-savings').textContent = '—';
+    }
+  }
+
+  function _initSetpointControlsOnce() {
+    if (_initSetpointControlsOnce._done) return;
+    _initSetpointControlsOnce._done = true;
+    const sel = $('setpoint-entity-select');
+    if (!sel) return;
+    sel.addEventListener('change', _refreshControlsFromSelection);
+
+    $('cool-slider').addEventListener('input', (e) => {
+      desiredCoolF = Number(e.target.value);
+      _refreshScenarios();
+    });
+    $('heat-slider').addEventListener('input', (e) => {
+      desiredHeatF = Number(e.target.value);
+      _refreshScenarios();
+    });
+
+    document.querySelectorAll('.setpoint-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const dir = btn.dataset.direction;
+        const delta = Number(btn.dataset.delta);
+        if (dir === 'cool' && desiredCoolF !== null && savingsBounds) {
+          desiredCoolF = Math.max(savingsBounds.cool_min_f, Math.min(savingsBounds.cool_max_f, desiredCoolF + delta));
+          $('cool-slider').value = desiredCoolF;
+        } else if (dir === 'heat' && desiredHeatF !== null && savingsBounds) {
+          desiredHeatF = Math.max(savingsBounds.heat_min_f, Math.min(savingsBounds.heat_max_f, desiredHeatF + delta));
+          $('heat-slider').value = desiredHeatF;
+        }
+        _refreshScenarios();
+      });
+    });
+
+    $('setpoint-reset').addEventListener('click', () => {
+      _refreshControlsFromSelection();
+      $('setpoint-status').textContent = '';
+    });
+
+    $('setpoint-apply').addEventListener('click', async () => {
+      const entity = $('setpoint-entity-select').value;
+      const ent = currentEntities.find(e => e.entity_id === entity);
+      const sp = _entitySetpoints(ent);
+      const payload = { entity_id: entity, ha_temp_unit: savingsUnit };
+      if (sp.cool !== null && desiredCoolF !== null && desiredCoolF !== originalCool) {
+        if (ent.target_high_f !== null && ent.target_high_f !== undefined) {
+          payload.target_high_f = desiredCoolF;
+          payload.target_low_f = (desiredHeatF !== null) ? desiredHeatF : ent.target_low_f;
+        } else {
+          payload.target_temp_f = desiredCoolF;
+        }
+      } else if (sp.heat !== null && desiredHeatF !== null && desiredHeatF !== originalHeat) {
+        if (ent.target_low_f !== null && ent.target_low_f !== undefined) {
+          payload.target_low_f = desiredHeatF;
+          payload.target_high_f = (desiredCoolF !== null) ? desiredCoolF : ent.target_high_f;
+        } else {
+          payload.target_temp_f = desiredHeatF;
+        }
+      } else {
+        $('setpoint-status').textContent = 'No change to apply.';
+        return;
+      }
+      $('setpoint-apply').disabled = true;
+      $('setpoint-status').textContent = 'Sending…';
+      try {
+        const r = await fetch(API + '/setpoint/set', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          $('setpoint-status').textContent = `Failed: ${j.detail || r.statusText}`;
+        } else if (j.needs_api) {
+          $('setpoint-status').textContent = j.message || 'HA API permission needed.';
+        } else {
+          $('setpoint-status').textContent = 'Applied. Thermostat will catch up within a minute.';
+          setTimeout(loadClimate, 5000);
+        }
+      } catch (e) {
+        $('setpoint-status').textContent = `Error: ${e}`;
+      } finally {
+        $('setpoint-apply').disabled = false;
+      }
+    });
+  }
+  document.addEventListener('DOMContentLoaded', _initSetpointControlsOnce);
+  // Also call directly in case DOMContentLoaded already fired
+  _initSetpointControlsOnce();
 
   function renderClimateNow(now, unit) {
     if (!now || now.temp_f === null || now.temp_f === undefined) {

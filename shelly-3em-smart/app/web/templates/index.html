@@ -249,6 +249,55 @@
       </p>
     </div>
 
+    <!-- Setpoint control + scenarios -->
+    <div class="card" id="setpoint-control-card" style="display:none;">
+      <div class="card-label">Setpoint control & savings <span class="muted" style="font-weight:400;font-size:0.8rem;">— change a thermostat and see the projected monthly cost impact</span></div>
+
+      <div id="setpoint-needs-api" class="muted" style="font-size:0.85rem;margin-top:8px;display:none;">
+        Setpoint <em>control</em> needs the add-on's <code>homeassistant_api</code> permission. After upgrading to 0.8.0, Supervisor will prompt you to grant it; click <strong>Update</strong> in the add-on's Configuration tab.
+      </div>
+
+      <div style="margin-top:10px;">
+        <label style="display:block;">
+          <span style="color:var(--fg);">Thermostat</span>
+          <select id="setpoint-entity-select" style="margin-top:4px;"></select>
+        </label>
+      </div>
+
+      <div class="setpoint-control-grid">
+        <!-- Cooling control -->
+        <div class="setpoint-control-cell" data-direction="cool">
+          <div class="muted">Cool setpoint <span class="setpoint-current" id="cool-current">—</span></div>
+          <div class="setpoint-slider-row">
+            <button class="setpoint-btn" data-direction="cool" data-delta="-1">−1°</button>
+            <input type="range" id="cool-slider" min="60" max="85" step="1" />
+            <button class="setpoint-btn" data-direction="cool" data-delta="+1">+1°</button>
+          </div>
+          <div class="setpoint-target" id="cool-target">—</div>
+          <div class="setpoint-savings" id="cool-savings">—</div>
+        </div>
+        <!-- Heating control -->
+        <div class="setpoint-control-cell" data-direction="heat">
+          <div class="muted">Heat setpoint <span class="setpoint-current" id="heat-current">—</span></div>
+          <div class="setpoint-slider-row">
+            <button class="setpoint-btn" data-direction="heat" data-delta="-1">−1°</button>
+            <input type="range" id="heat-slider" min="55" max="80" step="1" />
+            <button class="setpoint-btn" data-direction="heat" data-delta="+1">+1°</button>
+          </div>
+          <div class="setpoint-target" id="heat-target">—</div>
+          <div class="setpoint-savings" id="heat-savings">—</div>
+        </div>
+      </div>
+
+      <div class="actions" style="margin-top:14px;">
+        <button id="setpoint-apply" class="primary">Apply to thermostat</button>
+        <button id="setpoint-reset">Reset</button>
+        <span class="muted" id="setpoint-status" style="margin-left:12px;font-size:0.85rem;"></span>
+      </div>
+
+      <div id="savings-method-note" class="muted" style="font-size:0.8rem;margin-top:10px;">—</div>
+    </div>
+
     <!-- Setpoint timeline overlay (visible when climate entity configured) -->
     <div class="card" id="climate-setpoint-card" style="display:none;">
       <div class="card-label">Setpoint trends <span class="muted" style="font-weight:400;font-size:0.8rem;">— last 30 days</span></div>
