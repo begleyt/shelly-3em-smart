@@ -15,7 +15,7 @@ from .db import cursor
 from .ha_correlator import record_ha_event
 from .ha_energy import list_energy_sources, record_energy_reading
 from .inference import absorb_unlabeled_clusters
-from .insights import all_device_stats, anomaly_check, device_stats, insights, panel_energy_today, phantom_load
+from .insights import all_device_stats, anomaly_check, device_stats, history_summary, insights, panel_energy_today, phantom_load
 from .mqtt_publisher import publisher
 from .state import state
 
@@ -60,6 +60,22 @@ def get_insights():
             "top_devices_today": [],
             "all_devices_today": [],
             "anomalies": [],
+            "rate_cents_per_kwh": settings.electricity_rate_cents_per_kwh,
+            "currency_symbol": settings.currency_symbol,
+        }
+
+
+@router.get("/api/history_summary")
+def get_history_summary():
+    """Panel kWh / cost rolled up for today, yesterday, last 7 days, last
+    30 days. Bounded by samples-table retention (30 days)."""
+    try:
+        return history_summary()
+    except sqlite3.OperationalError as e:
+        log.warning("get_history_summary: db unavailable: %s", e)
+        empty = {"wh": 0.0, "cost": 0.0, "since": 0, "until": 0}
+        return {
+            "today": empty, "yesterday": empty, "last_7d": empty, "last_30d": empty,
             "rate_cents_per_kwh": settings.electricity_rate_cents_per_kwh,
             "currency_symbol": settings.currency_symbol,
         }

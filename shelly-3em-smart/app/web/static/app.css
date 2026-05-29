@@ -367,6 +367,40 @@ h2 { font-size: 1rem; font-weight: 600; margin: 0 0 var(--sp-3) 0; color: var(--
   .two-col { grid-template-columns: 1fr; }
 }
 
+.history-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+}
+.history-cell {
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-3) var(--sp-4);
+  text-align: left;
+}
+.history-label {
+  font-size: 0.75rem;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.history-value {
+  font-size: 1.4rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-1);
+  margin-top: 2px;
+}
+.history-sub {
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 800px) {
+  .history-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
 /* Activity feed */
 .activity-feed {
   display: flex;

@@ -420,13 +420,37 @@
   // --- Insights ---
   async function loadInsights() {
     try {
-      const r = await fetch(API + '/insights');
-      if (!r.ok) return;
-      const ins = await r.json();
-      renderInsights(ins);
+      const [insR, histR] = await Promise.all([
+        fetch(API + '/insights'),
+        fetch(API + '/history_summary'),
+      ]);
+      if (insR.ok) {
+        renderInsights(await insR.json());
+      }
+      if (histR.ok) {
+        renderHistory(await histR.json());
+      }
     } catch (e) {
       console.warn('insights fetch failed', e);
     }
+  }
+
+  function renderHistory(hist) {
+    const rate = appInfo.rate_cents_per_kwh || hist.rate_cents_per_kwh || 0;
+    const hasRate = rate > 0;
+    const sym = appInfo.currency_symbol || hist.currency_symbol || '$';
+    const setCell = (kwhId, costId, bucket) => {
+      const wh = (bucket && bucket.wh) || 0;
+      const cost = (bucket && bucket.cost) || 0;
+      const kwhEl = $(kwhId);
+      const costEl = $(costId);
+      if (kwhEl) kwhEl.textContent = fmtKwh(wh);
+      if (costEl) costEl.textContent = hasRate ? `${sym}${cost.toFixed(2)}` : '';
+    };
+    setCell('hist-today-kwh',     'hist-today-cost',     hist.today);
+    setCell('hist-yesterday-kwh', 'hist-yesterday-cost', hist.yesterday);
+    setCell('hist-7d-kwh',        'hist-7d-cost',        hist.last_7d);
+    setCell('hist-30d-kwh',       'hist-30d-cost',       hist.last_30d);
   }
 
   let energyDonutChart = null;
