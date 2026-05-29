@@ -105,6 +105,29 @@
       </div>
     </div>
 
+    <!-- Energy forecast (tomorrow + upcoming week) -->
+    <div class="card" id="forecast-card" style="display:none;">
+      <div class="card-label">Energy forecast <span class="muted" style="font-weight:400;font-size:0.8rem;">— from your weather entity's daily forecast + historical regression</span></div>
+      <div class="forecast-summary">
+        <div class="forecast-summary-cell">
+          <div class="muted">Tomorrow</div>
+          <div class="forecast-big" id="forecast-tomorrow-kwh">—</div>
+          <div class="muted" id="forecast-tomorrow-cost">—</div>
+          <div class="muted" id="forecast-tomorrow-temp">—</div>
+        </div>
+        <div class="forecast-summary-cell">
+          <div class="muted">Next 7 days total</div>
+          <div class="forecast-big" id="forecast-week-kwh">—</div>
+          <div class="muted" id="forecast-week-cost">—</div>
+          <div class="muted" id="forecast-week-meta">—</div>
+        </div>
+      </div>
+      <div style="position:relative;height:240px;margin-top:14px;">
+        <canvas id="forecast-chart"></canvas>
+      </div>
+      <p class="muted" style="font-size:0.8rem;margin-top:10px;" id="forecast-method-note">—</p>
+    </div>
+
     <!-- Two-column: breakdown donut + activity feed -->
     <div class="two-col">
       <div class="card">
@@ -151,6 +174,73 @@
         entity in the HACS integration's options. Outside-temperature readings
         will start flowing within a minute.
       </p>
+    </div>
+
+    <!-- Round thermostat dial + savings preview (at the top — primary action) -->
+    <div class="card" id="setpoint-control-card" style="display:none;">
+      <div class="setpoint-card-header">
+        <div>
+          <div class="card-label">Thermostat control</div>
+          <div class="muted" style="font-size:0.85rem;">Drag the dial or use ± to preview the monthly cost impact</div>
+        </div>
+        <select id="setpoint-entity-select" class="setpoint-entity-select"></select>
+      </div>
+
+      <div id="setpoint-needs-api" class="muted" style="font-size:0.85rem;margin-top:8px;display:none;">
+        Setpoint <em>control</em> needs the add-on's <code>homeassistant_api</code> permission. Grant it in the add-on's Configuration tab and restart.
+      </div>
+
+      <div class="thermostat-stage">
+        <!-- The Nest-style dial. Mode toggle picks which setpoint we adjust. -->
+        <div class="thermostat-dial-wrap">
+          <svg class="thermostat-dial" viewBox="0 0 320 320" id="thermostat-dial">
+            <!-- Background ring (tick marks) -->
+            <g id="thermostat-ticks"></g>
+            <!-- Filled arc showing distance from current temp to setpoint -->
+            <path id="thermostat-arc" d="" fill="none" stroke-width="14" stroke-linecap="round"></path>
+            <!-- Inner circle background -->
+            <circle cx="160" cy="160" r="118" fill="var(--surface-2)"></circle>
+            <!-- Setpoint big number -->
+            <text x="160" y="158" text-anchor="middle" font-size="76" font-weight="700"
+                  fill="var(--fg-1)" class="thermostat-setpoint-text" id="dial-setpoint-text">—</text>
+            <!-- Mode label below -->
+            <text x="160" y="198" text-anchor="middle" font-size="16" font-weight="600"
+                  fill="var(--muted)" id="dial-mode-text" letter-spacing="0.1em">—</text>
+            <!-- Current/inside temperature, smaller -->
+            <text x="160" y="232" text-anchor="middle" font-size="13"
+                  fill="var(--muted)" id="dial-current-text">—</text>
+            <!-- Handle on the ring -->
+            <circle cx="160" cy="42" r="10" id="thermostat-handle" fill="#fff"></circle>
+          </svg>
+          <!-- ± buttons -->
+          <button class="dial-step-btn dial-minus" id="dial-minus">−</button>
+          <button class="dial-step-btn dial-plus" id="dial-plus">+</button>
+        </div>
+
+        <!-- Cool/Heat toggle + scenario preview -->
+        <div class="thermostat-side">
+          <div class="thermostat-mode-toggle">
+            <button class="mode-pill" data-mode="cool" id="mode-cool">
+              <span class="dot cool"></span> Cool <span class="muted" id="mode-cool-current">—</span>
+            </button>
+            <button class="mode-pill" data-mode="heat" id="mode-heat">
+              <span class="dot heat"></span> Heat <span class="muted" id="mode-heat-current">—</span>
+            </button>
+          </div>
+
+          <div class="scenario-card" id="scenario-card">
+            <div class="scenario-headline" id="scenario-headline">—</div>
+            <div class="scenario-detail" id="scenario-detail">Move the dial to preview the impact.</div>
+            <div class="scenario-method" id="scenario-method">—</div>
+          </div>
+
+          <div class="actions">
+            <button id="setpoint-apply" class="primary">Apply</button>
+            <button id="setpoint-reset">Reset</button>
+            <span class="muted" id="setpoint-status" style="margin-left:10px;font-size:0.8rem;"></span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Today summary -->
@@ -250,54 +340,6 @@
     </div>
 
     <!-- Setpoint control + scenarios -->
-    <div class="card" id="setpoint-control-card" style="display:none;">
-      <div class="card-label">Setpoint control & savings <span class="muted" style="font-weight:400;font-size:0.8rem;">— change a thermostat and see the projected monthly cost impact</span></div>
-
-      <div id="setpoint-needs-api" class="muted" style="font-size:0.85rem;margin-top:8px;display:none;">
-        Setpoint <em>control</em> needs the add-on's <code>homeassistant_api</code> permission. After upgrading to 0.8.0, Supervisor will prompt you to grant it; click <strong>Update</strong> in the add-on's Configuration tab.
-      </div>
-
-      <div style="margin-top:10px;">
-        <label style="display:block;">
-          <span style="color:var(--fg);">Thermostat</span>
-          <select id="setpoint-entity-select" style="margin-top:4px;"></select>
-        </label>
-      </div>
-
-      <div class="setpoint-control-grid">
-        <!-- Cooling control -->
-        <div class="setpoint-control-cell" data-direction="cool">
-          <div class="muted">Cool setpoint <span class="setpoint-current" id="cool-current">—</span></div>
-          <div class="setpoint-slider-row">
-            <button class="setpoint-btn" data-direction="cool" data-delta="-1">−1°</button>
-            <input type="range" id="cool-slider" min="60" max="85" step="1" />
-            <button class="setpoint-btn" data-direction="cool" data-delta="+1">+1°</button>
-          </div>
-          <div class="setpoint-target" id="cool-target">—</div>
-          <div class="setpoint-savings" id="cool-savings">—</div>
-        </div>
-        <!-- Heating control -->
-        <div class="setpoint-control-cell" data-direction="heat">
-          <div class="muted">Heat setpoint <span class="setpoint-current" id="heat-current">—</span></div>
-          <div class="setpoint-slider-row">
-            <button class="setpoint-btn" data-direction="heat" data-delta="-1">−1°</button>
-            <input type="range" id="heat-slider" min="55" max="80" step="1" />
-            <button class="setpoint-btn" data-direction="heat" data-delta="+1">+1°</button>
-          </div>
-          <div class="setpoint-target" id="heat-target">—</div>
-          <div class="setpoint-savings" id="heat-savings">—</div>
-        </div>
-      </div>
-
-      <div class="actions" style="margin-top:14px;">
-        <button id="setpoint-apply" class="primary">Apply to thermostat</button>
-        <button id="setpoint-reset">Reset</button>
-        <span class="muted" id="setpoint-status" style="margin-left:12px;font-size:0.85rem;"></span>
-      </div>
-
-      <div id="savings-method-note" class="muted" style="font-size:0.8rem;margin-top:10px;">—</div>
-    </div>
-
     <!-- Setpoint timeline overlay (visible when climate entity configured) -->
     <div class="card" id="climate-setpoint-card" style="display:none;">
       <div class="card-label">Setpoint trends <span class="muted" style="font-weight:400;font-size:0.8rem;">— last 30 days</span></div>

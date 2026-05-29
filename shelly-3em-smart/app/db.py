@@ -220,6 +220,19 @@ CREATE TABLE IF NOT EXISTS weather_forecast_today (
     forecast_low_f  REAL,
     ts            REAL NOT NULL
 );
+
+-- Multi-day forecast for the upcoming week (or however many days the user's
+-- HA weather entity exposes). One row per date_str; refreshed on each poll.
+-- Drives the "tomorrow / next week" energy prediction card on Insights.
+CREATE TABLE IF NOT EXISTS weather_forecast_daily (
+    date_str        TEXT PRIMARY KEY,
+    forecast_high_f REAL,
+    forecast_low_f  REAL,
+    forecast_avg_f  REAL,         -- derived: (high + low) / 2
+    condition       TEXT,
+    refreshed_ts    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_weather_forecast_daily_date ON weather_forecast_daily(date_str);
 """
 
 

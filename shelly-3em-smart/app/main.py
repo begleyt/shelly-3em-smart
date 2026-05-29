@@ -90,7 +90,9 @@ async def on_sample(sample: dict) -> None:
 async def daily_rollup_loop(stop: asyncio.Event) -> None:
     """Roll up today (so the live counters stay current) every 10 min, and at
     each top of the hour also re-roll yesterday in case late samples landed.
-    Prune old weather samples once a day."""
+    Prune old weather samples once a day. Also auto-absorbs unlabeled
+    clusters into existing devices every tick so they don't pile up — users
+    were having to hit the Absorb button on every cluster manually."""
     from datetime import date, timedelta
     last_hourly = 0.0
     last_prune = 0.0
@@ -112,6 +114,15 @@ async def daily_rollup_loop(stop: asyncio.Event) -> None:
                 if pruned:
                     log.info("Pruned %d old weather samples", pruned)
                 last_prune = now
+            # Auto-absorb on each tick — cheap, idempotent, and avoids
+            # leaving recognised-but-untagged clusters on the Unlabeled tab.
+            try:
+                from .inference import absorb_unlabeled_clusters
+                r = absorb_unlabeled_clusters()
+                if r.get("absorbed"):
+                    log.info("Auto-absorbed %d unlabeled clusters", r["absorbed"])
+            except Exception:
+                log.exception("auto-absorb tick failed")
         except Exception:
             log.exception("daily_rollup_loop tick failed")
         try:

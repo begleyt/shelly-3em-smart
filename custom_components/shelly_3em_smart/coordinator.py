@@ -98,6 +98,7 @@ class ShellyAddonClient:
         ts: float | None = None,
         forecast_high_f: float | None = None,
         forecast_low_f: float | None = None,
+        forecast_days: list[dict] | None = None,
     ) -> None:
         payload = {
             "temp_f": temp_f,
@@ -107,6 +108,7 @@ class ShellyAddonClient:
             "ts": ts,
             "forecast_high_f": forecast_high_f,
             "forecast_low_f": forecast_low_f,
+            "forecast_days": forecast_days,
         }
         try:
             async with self._session.post(
